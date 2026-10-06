@@ -483,11 +483,31 @@ async def handle_incoming_message(event: events.NewMessage.Event):
     await process_terabox_link(event, target_url)
 
 
+async def start_dummy_web_server():
+    """Start an optional dummy HTTP health server for cloud platforms (Render, Koyeb, HF)."""
+    port_str = os.getenv("PORT")
+    if not port_str:
+        return
+    try:
+        from aiohttp import web
+        app = web.Application()
+        app.router.add_get("/", lambda r: web.Response(text="TeraBox Bot is running!"))
+        app.router.add_get("/health", lambda r: web.Response(text="OK"))
+        runner = web.AppRunner(app)
+        await runner.setup()
+        site = web.TCPSite(runner, "0.0.0.0", int(port_str))
+        await site.start()
+        logger.info(f"Cloud health-check web server started on port {port_str}")
+    except Exception as e:
+        logger.warning(f"Could not start dummy web server on port {port_str}: {e}")
+
+
 # ---------------- STARTUP & SHUTDOWN ---------------- #
 
 async def main():
     cleanup_leftover_parts()
     await db.init_db()
+    await start_dummy_web_server()
 
     logger.info("Starting Telegram Bot via Telethon...")
     if not config.BOT_TOKEN:
