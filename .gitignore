@@ -1,0 +1,38 @@
+# Environment and Credentials
+.env
+cookie.env/
+cookies*.txt
+*.env
+_research/
+*.part
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+env/
+venv/
+ENV/
+build/
+develop-eggs/
+dist/
+downloads/
+temp/
+logs/
+
+# Telegram Telethon Sessions
+*.session
+*.session-journal
+
+# SQLite databases
+*.db
+*.sqlite
+*.sqlite3
+
+# OS Specific
+Thumbs.db
+ehthumbs.db
+Desktop.ini
+.DS_Store
