@@ -94,9 +94,11 @@ def render_progress_text(action: str, filename: str, current: int, total: int, s
 
 # ---------------- COMMAND HANDLERS ---------------- #
 
-@client.on(events.NewMessage(pattern=r"^/start$"))
+@client.on(events.NewMessage(pattern=r"^/start$", incoming=True, func=lambda e: not e.out))
 async def handle_start(event: events.NewMessage.Event):
     sender = await event.get_sender()
+    if not sender or getattr(sender, "bot", False):
+        return
     user_id = event.sender_id
     await db.record_user(user_id, getattr(sender, "username", ""), getattr(sender, "first_name", ""))
 
@@ -123,8 +125,11 @@ async def handle_start(event: events.NewMessage.Event):
     await event.reply(welcome_text)
 
 
-@client.on(events.NewMessage(pattern=r"^/help$"))
+@client.on(events.NewMessage(pattern=r"^/help$", incoming=True, func=lambda e: not e.out))
 async def handle_help(event: events.NewMessage.Event):
+    sender = await event.get_sender()
+    if not sender or getattr(sender, "bot", False):
+        return
     user_id = event.sender_id
     if not is_allowed_user(user_id):
         return
@@ -142,8 +147,11 @@ async def handle_help(event: events.NewMessage.Event):
     await event.reply(help_text)
 
 
-@client.on(events.NewMessage(pattern=r"^/ping$"))
+@client.on(events.NewMessage(pattern=r"^/ping$", incoming=True, func=lambda e: not e.out))
 async def handle_ping(event: events.NewMessage.Event):
+    sender = await event.get_sender()
+    if not sender or getattr(sender, "bot", False):
+        return
     user_id = event.sender_id
     if not is_allowed_user(user_id):
         return
@@ -154,7 +162,7 @@ async def handle_ping(event: events.NewMessage.Event):
     await msg.edit(f"🏓 **Pong!** Latency: `{latency_ms} ms`")
 
 
-@client.on(events.NewMessage(pattern=r"^/broadcast(?:\s+([\s\S]+))?"))
+@client.on(events.NewMessage(pattern=r"^/broadcast(?:\s+([\s\S]+))?$", incoming=True, func=lambda e: not e.out))
 async def handle_broadcast(event: events.NewMessage.Event):
     user_id = event.sender_id
     if user_id not in config.ADMIN_IDS:
@@ -448,25 +456,28 @@ async def process_terabox_link(event: events.NewMessage.Event, url: str):
 
 # ---------------- MESSAGE DISPATCHER ---------------- #
 
-@client.on(events.NewMessage)
+@client.on(events.NewMessage(incoming=True, func=lambda e: not e.out))
 async def handle_incoming_message(event: events.NewMessage.Event):
-    # Ignore slash commands (they have their own handlers)
+    # Ignore outgoing messages sent by the bot itself
+    if event.out:
+        return
+
+    # Ignore messages sent by other bots
+    sender = await event.get_sender()
+    if not sender or getattr(sender, "bot", False):
+        return
+
+    # Ignore slash commands (they have their own specific handlers)
     if event.raw_text.startswith("/"):
         return
 
-    user_id = event.sender_id
-    sender = await event.get_sender()
-    await db.record_user(user_id, getattr(sender, "username", ""), getattr(sender, "first_name", ""))
-
     urls = extract_urls(event.raw_text)
     if not urls:
-        if event.is_private:
-            logger.info(f"Received text without TeraBox link from {user_id}: {event.raw_text[:40]}")
-            await event.reply(
-                "👋 **TeraBox Downloader Bot is active!**\n\n"
-                "Please send a valid **TeraBox share link** to download, or use `/help` for commands."
-            )
+        # Ignore normal chat messages to prevent any message ping-pong loops
         return
+
+    user_id = event.sender_id
+    await db.record_user(user_id, getattr(sender, "username", ""), getattr(sender, "first_name", ""))
 
     if not is_allowed_user(user_id):
         logger.warning(f"Unauthorized access attempt from user {user_id}")
