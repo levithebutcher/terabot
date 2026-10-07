@@ -233,15 +233,15 @@ class TeraBoxResolver:
         errmsg = data.get("errmsg", "")
 
         # Check specific TeraBox error codes
-        if errno in (4000020, 400210) or "need verify" in str(errmsg).lower():
+        if errno in (4000020, 400210, 400141) or "need verify" in str(errmsg).lower():
             raise CookieExpiredError(
                 f"TeraBox session authentication failed (errno {errno}: {errmsg}). "
                 "Your TERABOX_COOKIE (ndus token) is either missing, invalid, or requires re-verification. "
                 "Please update TERABOX_COOKIE in .env with a fresh browser cookie."
             )
-        if errno in (-7, 110) or "share does not exist" in str(errmsg).lower():
+        if errno in (-7, 110, 140, 105) or "share does not exist" in str(errmsg).lower():
             raise ShareLinkExpiredError(
-                f"The TeraBox share link is invalid, expired, or files have been removed (errno {errno}: {errmsg})."
+                f"The TeraBox share link has expired or files have been deleted by the owner (errno {errno})."
             )
         if errno == -4:
             raise ShareLinkExpiredError(
