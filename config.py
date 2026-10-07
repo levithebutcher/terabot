@@ -79,6 +79,9 @@ except ValueError:
 FALLBACK_API_URL: str = os.getenv("FALLBACK_API_URL", "").strip()
 FALLBACK_API_KEY: str = os.getenv("FALLBACK_API_KEY", "").strip()
 
+# Cloudflare Worker / Reverse Proxy URL (Optional, bypasses Cloudflare challenge)
+PROXY_URL: str = os.getenv("PROXY_URL", "").strip().rstrip("/")
+
 # File Paths
 DOWNLOAD_DIR: Path = BASE_DIR / os.getenv("DOWNLOAD_DIR", "downloads")
 DOWNLOAD_DIR.mkdir(parents=True, exist_ok=True)

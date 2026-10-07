@@ -7,7 +7,7 @@ from urllib.parse import urlparse
 import aiohttp
 from curl_cffi.requests import AsyncSession
 
-from config import TERABOX_COOKIE, FALLBACK_API_URL, FALLBACK_API_KEY
+from config import TERABOX_COOKIE, FALLBACK_API_URL, FALLBACK_API_KEY, PROXY_URL
 from utils.helpers import extract_surl, format_bytes, sanitize_filename
 from utils.logger import logger
 
@@ -69,6 +69,13 @@ class TeraBoxResolver:
     def __init__(self, cookie: Optional[str] = None):
         self.cookie = cookie if cookie is not None else TERABOX_COOKIE
 
+    def _wrap_url(self, target_url: str) -> str:
+        """If PROXY_URL (Cloudflare Worker) is configured, wrap request through worker."""
+        if not PROXY_URL:
+            return target_url
+        from urllib.parse import quote
+        return f"{PROXY_URL}/?target_url={quote(target_url, safe='')}"
+
     def _get_cookie_dict(self) -> dict:
         """Parse raw cookie header string into a dictionary."""
         cookies = {}
@@ -125,10 +132,11 @@ class TeraBoxResolver:
         for domain in self.PRIMARY_DOMAINS:
             for s_var in surl_variants:
                 target_url = f"https://{domain}/sharing/link?surl={s_var}"
+                fetch_url = self._wrap_url(target_url)
                 headers = self._get_headers()
 
                 try:
-                    resp = await session.get(target_url, headers=headers, timeout=12)
+                    resp = await session.get(fetch_url, headers=headers, timeout=15)
 
                     if resp.status_code in (403, 503):
                         if "Just a moment" in resp.text or "Cloudflare" in resp.text:
@@ -216,8 +224,9 @@ class TeraBoxResolver:
             "X-Requested-With": "XMLHttpRequest",
         })
 
+        fetch_api_url = self._wrap_url(api_url)
         try:
-            resp = await session.get(api_url, params=params, headers=headers, timeout=15)
+            resp = await session.get(fetch_api_url, params=params, headers=headers, timeout=15)
         except Exception as e:
             raise ResolverError(f"Network error querying /share/list: {e}")
 
