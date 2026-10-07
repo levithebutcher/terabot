@@ -243,13 +243,15 @@ async def process_terabox_link(event: events.NewMessage.Event, url: str):
             await status_msg.edit(
                 "❌ **Authentication Failed** `[ERR-COOKIE]`\n\n"
                 "The bot's TeraBox session cookie has expired or triggered a verification challenge.\n"
-                "The bot owner has been notified."
+                "Please update `TERABOX_COOKIE` in Render Environment."
             )
-            await notify_admins(
-                "🚨 **ADMIN ALERT: TeraBox Cookie Expired!**\n\n"
-                "The configured `TERABOX_COOKIE` in `.env` has expired or returned `need verify_v2`.\n"
-                "Please extract a fresh `ndus` cookie from your browser and update `.env`."
-            )
+            # Only notify other admins if the person who sent the link is NOT an admin
+            if user_id not in config.ADMIN_IDS:
+                await notify_admins(
+                    "🚨 **ADMIN ALERT: TeraBox Cookie Expired!**\n\n"
+                    "The configured `TERABOX_COOKIE` has expired or returned `need verify_v2`.\n"
+                    "Please extract a fresh `ndus` cookie from your browser and update Render Environment."
+                )
             return
         except ShareLinkExpiredError as e:
             logger.warning(f"[ERR-SHARE] Share link inaccessible: {e}")
