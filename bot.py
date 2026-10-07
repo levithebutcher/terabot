@@ -217,11 +217,12 @@ async def process_terabox_link(event: events.NewMessage.Event, url: str):
     """Core pipeline for link resolution, queueing, downloading, and uploading."""
     user_id = event.sender_id
 
-    # Rate limiting & active check
-    can_proceed, reason = await queue_mgr.can_process_user(user_id)
-    if not can_proceed:
-        await event.reply(reason)
-        return
+    # Rate limiting & active check (Admins bypass rate limits)
+    if user_id not in config.ADMIN_IDS:
+        can_proceed, reason = await queue_mgr.can_process_user(user_id)
+        if not can_proceed:
+            await event.reply(reason)
+            return
 
     queue_pos = await queue_mgr.acquire_slot(user_id)
     status_msg: Optional[Message] = None
