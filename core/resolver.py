@@ -55,6 +55,7 @@ class TeraBoxResolver:
     """
 
     PRIMARY_DOMAINS = [
+        "dm.terabox.app",
         "www.terabox.app",
         "terabox.app",
         "www.1024tera.com",
@@ -62,7 +63,6 @@ class TeraBoxResolver:
         "www.tibibox.com",
         "www.freeterabox.com",
         "www.teraboxapp.com",
-        "dm.terabox.app",
         "terabox.com",
     ]
 
@@ -195,8 +195,8 @@ class TeraBoxResolver:
         num: int = 100,
     ) -> dict:
         """Call the /share/list API endpoint."""
-        # Always query the unblocked primary API host
-        api_url = "https://www.terabox.app/share/list"
+        # Query dm.terabox.app which directly delivers active dlink with ndus session
+        api_url = "https://dm.terabox.app/share/list"
 
         params = {
             "app_id": "250528",
@@ -341,44 +341,93 @@ class TeraBoxResolver:
         return all_files
 
     async def _resolve_fallback_api(self, url: str) -> list[TeraFile]:
-        """Query fallback external API if configured."""
-        if not FALLBACK_API_URL:
+        """Query fallback external API (supports RapidAPI and REST endpoints)."""
+        import config
+        fallback_url = config.FALLBACK_API_URL
+        fallback_key = config.FALLBACK_API_KEY
+
+        if not fallback_url:
             raise ResolverError("No fallback resolver API configured in FALLBACK_API_URL.")
 
         logger.info(f"Invoking fallback resolver API for {url[:50]}...")
-        headers = {"User-Agent": "Mozilla/5.0"}
-        if FALLBACK_API_KEY:
-            headers["Authorization"] = f"Bearer {FALLBACK_API_KEY}"
+
+        # Detect if it's a RapidAPI endpoint
+        is_rapidapi = "rapidapi.com" in fallback_url or bool(fallback_key and "msh" in fallback_key)
 
         async with aiohttp.ClientSession() as session:
-            sep = "&" if "?" in FALLBACK_API_URL else "?"
-            api_endpoint = f"{FALLBACK_API_URL}{sep}url={url}"
-            async with session.get(api_endpoint, headers=headers, timeout=aiohttp.ClientTimeout(total=30)) as resp:
-                if resp.status != 200:
-                    text = await resp.text()
-                    raise ResolverError(f"Fallback API HTTP {resp.status}: {text[:100]}")
+            if is_rapidapi:
+                from urllib.parse import urlparse
+                parsed_host = urlparse(fallback_url).netloc
+                rapid_headers = {
+                    "x-rapidapi-host": parsed_host,
+                    "x-rapidapi-key": fallback_key,
+                }
+                form_data = aiohttp.FormData()
+                form_data.add_field("url", url)
 
-                data = await resp.json()
-                file_list = data.get("files") or data.get("list") or [data] if "dlink" in data or "download_url" in data else []
-                if not file_list:
-                    raise ResolverError("Fallback API returned no files.")
+                async with session.post(
+                    fallback_url,
+                    data=form_data,
+                    headers=rapid_headers,
+                    timeout=aiohttp.ClientTimeout(total=35),
+                ) as resp:
+                    if resp.status != 200:
+                        text = await resp.text()
+                        raise ResolverError(f"RapidAPI HTTP {resp.status}: {text[:100]}")
+                    data = await resp.json()
+            else:
+                headers = {"User-Agent": "Mozilla/5.0"}
+                if fallback_key:
+                    headers["Authorization"] = f"Bearer {fallback_key}"
+                sep = "&" if "?" in fallback_url else "?"
+                api_endpoint = f"{fallback_url}{sep}url={url}"
+                async with session.get(
+                    api_endpoint,
+                    headers=headers,
+                    timeout=aiohttp.ClientTimeout(total=35),
+                ) as resp:
+                    if resp.status != 200:
+                        text = await resp.text()
+                        raise ResolverError(f"Fallback API HTTP {resp.status}: {text[:100]}")
+                    data = await resp.json()
 
-                results = []
-                for f in file_list:
-                    dl = f.get("download_url") or f.get("dlink") or f.get("link", "")
-                    name = sanitize_filename(f.get("filename") or f.get("server_filename") or f.get("file_name", "file"))
-                    size_b = int(f.get("size", 0) or f.get("size_bytes", 0))
-                    results.append(
-                        TeraFile(
-                            file_name=name,
-                            size=size_b,
-                            size_readable=format_bytes(size_b),
-                            dlink=dl,
-                            fs_id=str(f.get("fs_id", "")),
-                            thumb=f.get("thumb") or f.get("thumbnail"),
-                        )
+            # Parse files from unified response formats
+            file_list = (
+                data.get("list")
+                or data.get("files")
+                or data.get("data")
+                or ([data] if ("download_link" in data or "dlink" in data or "download_url" in data) else [])
+            )
+            if not file_list:
+                raise ResolverError(f"Fallback API returned no files: {data}")
+
+            results = []
+            for f in file_list:
+                dl = (
+                    f.get("download_link")
+                    or f.get("download_url")
+                    or f.get("dlink")
+                    or f.get("link", "")
+                )
+                name = sanitize_filename(
+                    f.get("server_filename")
+                    or f.get("name")
+                    or f.get("filename")
+                    or f.get("file_name", "file")
+                )
+                size_b = int(f.get("size", 0) or f.get("size_bytes", 0))
+                thumb = f.get("thumb") or f.get("thumbnail") or f.get("image")
+                results.append(
+                    TeraFile(
+                        file_name=name,
+                        size=size_b,
+                        size_readable=format_bytes(size_b),
+                        dlink=dl,
+                        fs_id=str(f.get("fs_id", "")),
+                        thumb=thumb,
                     )
-                return results
+                )
+            return results
 
     async def resolve(self, url: str) -> list[TeraFile]:
         """
