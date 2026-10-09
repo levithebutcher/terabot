@@ -137,7 +137,7 @@ async def fast_upload_file(
             id=file_id,
             parts=part_count,
             name=file_name,
-            md5_checksum=md5_hash,
+            md5_checksum=md5_hash.hexdigest(),
         )
 
 
