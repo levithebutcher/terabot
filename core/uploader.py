@@ -133,12 +133,11 @@ async def fast_upload_file(
     if is_big:
         return types.InputFileBig(id=file_id, parts=part_count, name=file_name)
     else:
-        return custom.InputSizedFile(
+        return types.InputFile(
             id=file_id,
             parts=part_count,
             name=file_name,
-            md5=md5_hash,
-            size=file_size,
+            md5_checksum=md5_hash,
         )
 
 

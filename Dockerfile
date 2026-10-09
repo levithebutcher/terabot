@@ -24,6 +24,15 @@ RUN pip install --no-cache-dir --upgrade pip && \
 # Copy application source code
 COPY . .
 
+# Hugging Face Spaces requires running as a non-root user (UID 1000)
+RUN useradd -m -u 1000 user
+# Give the user ownership of the /app directory so it can write DB and downloads
+RUN chown -R user:user /app
+USER user
+
+# Create downloads directory explicitly
+RUN mkdir -p /app/downloads
+
 # Expose standard cloud port
 EXPOSE 8080 10000 7860
 
