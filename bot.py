@@ -280,12 +280,23 @@ async def process_terabox_link(event: events.NewMessage.Event, url: str):
         
         MAX_FILES_PER_LINK = 100
         if total_files > MAX_FILES_PER_LINK:
-            await status_msg.edit(
-                f"❌ **Too many files!**\n\n"
-                f"This folder contains **{total_files}** files.\n"
-                f"To prevent spam and server crashes, this bot can only process up to **{MAX_FILES_PER_LINK}** files per link.\n\n"
-                f"Please open the original link in your browser to view or download them."
+            import io
+            await status_msg.edit(f"⏳ **Folder is too large!**\n\nThis folder contains **{total_files}** files.\nGenerating a text file with all Direct Download Links...")
+            
+            text_content = f"TeraBox Direct Links for: {url}\nTotal Files: {total_files}\n\n"
+            for f_idx, f_obj in enumerate(files, 1):
+                text_content += f"[{f_idx}] {f_obj.file_name} ({f_obj.size_readable})\nLink: {f_obj.dlink}\n\n"
+            
+            file_bytes = io.BytesIO(text_content.encode("utf-8"))
+            file_bytes.name = "TeraBox_Direct_Links.txt"
+            
+            await client.send_file(
+                entity=event.chat_id,
+                file=file_bytes,
+                caption=f"📁 **Too Many Files ({total_files})**\n\n✅ Here is a text file containing the **High-Speed Direct Download Links** for all {total_files} files! You can open it and copy the links.",
+                reply_to=event.message.id
             )
+            await status_msg.delete()
             return
 
         is_multi_file = total_files > 1
