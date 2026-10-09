@@ -49,11 +49,11 @@ if PRIVATE_CHAT_ID_RAW:
 TERABOX_COOKIE: str = os.getenv("TERABOX_COOKIE", "").strip()
 
 # Parallel Download Streams (Default 6, clamp between 1 and 12)
-DOWNLOAD_STREAMS_RAW = os.getenv("DOWNLOAD_STREAMS", "6").strip()
+DOWNLOAD_STREAMS_RAW = os.getenv("DOWNLOAD_STREAMS", "12").strip()
 try:
-    DOWNLOAD_STREAMS: int = max(1, min(12, int(DOWNLOAD_STREAMS_RAW)))
+    DOWNLOAD_STREAMS: int = max(1, min(24, int(DOWNLOAD_STREAMS_RAW)))
 except ValueError:
-    DOWNLOAD_STREAMS = 6
+    DOWNLOAD_STREAMS = 12
 
 # Max File Size in MB (Default 2000 MB for standard Telegram MTProto limits)
 MAX_FILE_SIZE_MB_RAW = os.getenv("MAX_FILE_SIZE_MB", "2000").strip()

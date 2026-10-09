@@ -22,7 +22,7 @@ class TeraBoxDownloader:
     streaming chunk writes, live speed tracking, and single-stream fallback.
     """
 
-    CHUNK_SIZE = 1024 * 256  # 256 KB buffer
+    CHUNK_SIZE = 1024 * 1024  # 1 MB buffer
     DEFAULT_PARALLEL_CONNECTIONS = 6
 
     def __init__(self, cookie: Optional[str] = None, connections: int = DEFAULT_PARALLEL_CONNECTIONS):
