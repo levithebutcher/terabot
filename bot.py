@@ -6,8 +6,11 @@ import time
 from pathlib import Path
 from typing import Optional
 
+import re
+import uuid
+
 import aiohttp
-from telethon import TelegramClient, events
+from telethon import TelegramClient, events, Button
 from telethon.errors import FloodWaitError
 from telethon.tl.patched import Message
 
@@ -279,7 +282,16 @@ async def download_thumbnail(thumb_url: str, output_path: Path) -> Optional[Path
     return None
 
 
-async def process_terabox_link(event: events.NewMessage.Event, url: str, filter_mode: str = "all"):
+def make_stop_btn(user_id: int):
+    return [[Button.inline("🛑 Abort Task", data=f"stop:{user_id}")]]
+
+
+async def process_terabox_link(
+    event: events.NewMessage.Event,
+    url: str,
+    filter_mode: str = "all",
+    has_explicit_inline_filter: bool = False,
+):
     """Core pipeline for link resolution, queueing, downloading, and uploading."""
     user_id = event.sender_id
 
@@ -343,11 +355,69 @@ async def process_terabox_link(event: events.NewMessage.Event, url: str, filter_
             return
 
         raw_count = len(files)
-        # Apply Smart Extension Filtering
-        if filter_mode == "video":
-            files = [f for f in files if Path(f.file_name).suffix.lower() in VIDEO_EXTENSIONS]
-        elif filter_mode == "photo":
-            files = [f for f in files if Path(f.file_name).suffix.lower() in PHOTO_EXTENSIONS]
+        video_files = [f for f in files if Path(f.file_name).suffix.lower() in VIDEO_EXTENSIONS]
+        photo_files = [f for f in files if Path(f.file_name).suffix.lower() in PHOTO_EXTENSIONS]
+        other_count = raw_count - len(video_files) - len(photo_files)
+
+        # Interactive Button Card: Prompt user if folder contains multiple items and no inline filter was specified
+        if raw_count > 1 and not has_explicit_inline_filter:
+            session_id = uuid.uuid4().hex[:8]
+            loop = asyncio.get_running_loop()
+            future = loop.create_future()
+            pending_prompts[session_id] = (user_id, future)
+
+            buttons = []
+            row1 = []
+            if len(video_files) > 0:
+                row1.append(Button.inline(f"🎬 Only Videos ({len(video_files)})", data=f"act:video:{session_id}"))
+            if len(photo_files) > 0:
+                row1.append(Button.inline(f"🖼️ Only Photos ({len(photo_files)})", data=f"act:photo:{session_id}"))
+            if row1:
+                buttons.append(row1)
+
+            buttons.append([
+                Button.inline(f"📁 Download All ({raw_count})", data=f"act:all:{session_id}"),
+                Button.inline("❌ Cancel", data=f"act:cancel:{session_id}"),
+            ])
+
+            msg_text = (
+                f"📂 **Folder Discovered**\n\n"
+                f"📊 **Total Files**: `{raw_count}`\n"
+                f"• 🎬 **Videos**: `{len(video_files)}`\n"
+                f"• 🖼️ **Photos**: `{len(photo_files)}`\n"
+            )
+            if other_count > 0:
+                msg_text += f"• 📄 **Other Files**: `{other_count}`\n"
+            msg_text += "\n👇 **Aapko kya download karna hai? Choose karo:**"
+
+            await status_msg.edit(msg_text, buttons=buttons)
+
+            try:
+                chosen_action = await asyncio.wait_for(future, timeout=300)
+            except asyncio.TimeoutError:
+                await status_msg.edit("⏱️ **Selection timed out (5 min).** Please resend link if needed.", buttons=None)
+                return
+            finally:
+                pending_prompts.pop(session_id, None)
+
+            if chosen_action == "cancel":
+                await status_msg.edit("❌ **Download cancelled by user.**", buttons=None)
+                return
+
+            if chosen_action == "video":
+                files = video_files
+                filter_mode = "video"
+            elif chosen_action == "photo":
+                files = photo_files
+                filter_mode = "photo"
+            else:
+                filter_mode = "all"
+        else:
+            # Inline filter specified or single file
+            if filter_mode == "video":
+                files = video_files
+            elif filter_mode == "photo":
+                files = photo_files
 
         total_files = len(files)
 
@@ -356,7 +426,8 @@ async def process_terabox_link(event: events.NewMessage.Event, url: str, filter_
             await status_msg.edit(
                 f"⚠️ **No {type_label} Found!**\n\n"
                 f"This share contains **{raw_count} files**, but **0** matched your filter (`{filter_mode.upper()}`).\n\n"
-                f"💡 _Tip: Use `/filter all` or add `all` to download all files without filtering._"
+                f"💡 _Tip: Use `/filter all` or add `all` to download all files without filtering._",
+                buttons=None,
             )
             return
 
@@ -365,10 +436,11 @@ async def process_terabox_link(event: events.NewMessage.Event, url: str, filter_
         if is_multi_file:
             filter_badge = f"\n🎯 **Filter Active**: `{filter_mode.upper()} ONLY` ({total_files} of {raw_count} files selected)" if filter_mode != "all" else ""
             await status_msg.edit(
-                f"📂 **Discovered {total_files} files** in this share.{filter_badge}\n"
-                "⏳ *Beginning smart batch download (Albums for small files, Standalone for large files)...*"
+                f"📂 **Processing {total_files} files** in this share.{filter_badge}\n"
+                "⏳ *Beginning smart batch download...*",
+                buttons=make_stop_btn(user_id),
             )
-            await asyncio.sleep(2)
+            await asyncio.sleep(1.5)
 
         album_paths = []
         album_captions = []
@@ -381,7 +453,10 @@ async def process_terabox_link(event: events.NewMessage.Event, url: str, filter_
             if not album_paths:
                 return
             try:
-                await status_msg.edit(f"📤 Uploading Album ({len(album_paths)} items) to Telegram...")
+                await status_msg.edit(
+                    f"📤 Uploading Album ({len(album_paths)} items) to Telegram...",
+                    buttons=make_stop_btn(user_id),
+                )
                 if config.PRIVATE_CHAT_ID:
                     msgs = await client.send_file(config.PRIVATE_CHAT_ID, album_paths, caption=album_captions)
                     await client.forward_messages(event.chat_id, msgs)
@@ -430,8 +505,10 @@ async def process_terabox_link(event: events.NewMessage.Event, url: str, filter_
                     if now - last_edit_time >= 3.0 or current == total:
                         last_edit_time = now
                         txt = render_progress_text(f"📥 {file_prefix}Downloading", file_obj.file_name, current, total, speed)
-                        try: await status_msg.edit(txt)
-                        except: pass
+                        try:
+                            await status_msg.edit(txt, buttons=make_stop_btn(user_id))
+                        except Exception:
+                            pass
 
                 downloader = TeraBoxDownloader(connections=config.DOWNLOAD_STREAMS)
                 try:
@@ -440,7 +517,7 @@ async def process_terabox_link(event: events.NewMessage.Event, url: str, filter_
                         expected_size=file_obj.size, progress_callback=download_progress
                     )
                 except DownloadError as e:
-                    await status_msg.edit(f"❌ {file_prefix}**Download Failed**: {str(e)}")
+                    await status_msg.edit(f"❌ {file_prefix}**Download Failed**: {str(e)}", buttons=None)
                     continue
 
                 # Upload File Standalone
@@ -451,8 +528,10 @@ async def process_terabox_link(event: events.NewMessage.Event, url: str, filter_
                     if now - last_upload_edit >= 3.5 or current == total:
                         last_upload_edit = now
                         txt = render_progress_text(f"📤 {file_prefix}Uploading to Telegram", file_obj.file_name, current, total, speed)
-                        try: await status_msg.edit(txt)
-                        except: pass
+                        try:
+                            await status_msg.edit(txt, buttons=make_stop_btn(user_id))
+                        except Exception:
+                            pass
 
                 caption = f"📄 **{file_obj.file_name}**\n\n💾 **Size**: {file_obj.size_readable}\n"
                 if file_obj.duration > 0:
@@ -487,8 +566,10 @@ async def process_terabox_link(event: events.NewMessage.Event, url: str, filter_
                 if now - last_edit_time >= 3.0 or current == total:
                     last_edit_time = now
                     txt = render_progress_text(f"📥 {file_prefix}Downloading (Album Batch)", file_obj.file_name, current, total, speed)
-                    try: await status_msg.edit(txt)
-                    except: pass
+                    try:
+                        await status_msg.edit(txt, buttons=make_stop_btn(user_id))
+                    except Exception:
+                        pass
 
             # Download small file
             downloader = TeraBoxDownloader(connections=4)
@@ -525,9 +606,53 @@ async def process_terabox_link(event: events.NewMessage.Event, url: str, filter_
         queue_mgr.release_worker(user_id)
 
 
-# ---------------- MESSAGE DISPATCHER ---------------- #
+# ---------------- MESSAGE DISPATCHER & CALLBACKS ---------------- #
 
 active_tasks: dict[int, asyncio.Task] = {}
+pending_prompts: dict[str, tuple[int, asyncio.Future]] = {}
+
+@client.on(events.CallbackQuery(pattern=r"^act:(video|photo|all|cancel):([a-f0-9]+)$"))
+async def handle_action_callback(event: events.CallbackQuery.Event):
+    action = event.pattern_match.group(1).decode("utf-8")
+    session_id = event.pattern_match.group(2).decode("utf-8")
+
+    fut_info = pending_prompts.get(session_id)
+    if not fut_info:
+        await event.answer("⚠️ Session expired! Please resend the link.", alert=True)
+        return
+
+    owner_id, future = fut_info
+    if event.sender_id != owner_id:
+        await event.answer("⛔ This choice is for another user!", alert=True)
+        return
+
+    if not future.done():
+        future.set_result(action)
+        if action == "cancel":
+            await event.answer("❌ Cancelled.", alert=False)
+        else:
+            label = "Videos Only" if action == "video" else ("Photos Only" if action == "photo" else "All Files")
+            await event.answer(f"🚀 Selected {label}!", alert=False)
+
+
+@client.on(events.CallbackQuery(pattern=r"^stop:(\d+)$"))
+async def handle_stop_callback(event: events.CallbackQuery.Event):
+    target_user_id = int(event.pattern_match.group(1).decode("utf-8"))
+    if event.sender_id != target_user_id:
+        await event.answer("⛔ You cannot stop another user's download!", alert=True)
+        return
+
+    if target_user_id in active_tasks:
+        task = active_tasks.pop(target_user_id)
+        task.cancel()
+        await event.answer("🛑 Task Aborted!", alert=False)
+        try:
+            await event.edit("🛑 **Task stopped by user.**\nAll ongoing operations aborted.", buttons=None)
+        except Exception:
+            pass
+    else:
+        await event.answer("ℹ️ No active task running.", alert=False)
+
 
 @client.on(events.NewMessage(pattern=r"(?i)^/(cancel|stop)$"))
 async def handle_cancel(event: events.NewMessage.Event):
@@ -586,11 +711,19 @@ async def handle_incoming_message(event: events.NewMessage.Event):
         inline_filter = "all"
 
     # Use inline filter if specified; otherwise load user's persistent default
+    has_explicit_inline_filter = inline_filter is not None
     active_filter = inline_filter if inline_filter else await db.get_user_filter(user_id)
 
     logger.info(f"Received download request from user {user_id} [Filter: {active_filter}]: {target_url[:50]}...")
     
-    task = asyncio.create_task(process_terabox_link(event, target_url, filter_mode=active_filter))
+    task = asyncio.create_task(
+        process_terabox_link(
+            event,
+            target_url,
+            filter_mode=active_filter,
+            has_explicit_inline_filter=has_explicit_inline_filter,
+        )
+    )
     active_tasks[user_id] = task
     try:
         await task
