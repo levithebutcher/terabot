@@ -32,6 +32,12 @@ class Database:
                     last_seen REAL
                 )
             """)
+            await db.execute("""
+                CREATE TABLE IF NOT EXISTS user_settings (
+                    user_id INTEGER PRIMARY KEY,
+                    filter_mode TEXT DEFAULT 'all'
+                )
+            """)
             await db.commit()
         logger.info(f"Database initialized at {self.db_path}")
 
@@ -85,6 +91,32 @@ class Database:
             async with db.execute("SELECT user_id FROM users") as cursor:
                 rows = await cursor.fetchall()
                 return [int(r[0]) for r in rows]
+
+    async def get_user_filter(self, user_id: int) -> str:
+        """Get user's default filter mode ('all', 'video', 'photo')."""
+        async with aiosqlite.connect(self.db_path) as db:
+            async with db.execute(
+                "SELECT filter_mode FROM user_settings WHERE user_id = ?",
+                (user_id,),
+            ) as cursor:
+                row = await cursor.fetchone()
+                if row and row[0]:
+                    return str(row[0]).lower()
+        return "all"
+
+    async def set_user_filter(self, user_id: int, filter_mode: str):
+        """Set user's default filter mode ('all', 'video', 'photo')."""
+        filter_mode = filter_mode.lower()
+        async with aiosqlite.connect(self.db_path) as db:
+            await db.execute(
+                """
+                INSERT INTO user_settings (user_id, filter_mode)
+                VALUES (?, ?)
+                ON CONFLICT(user_id) DO UPDATE SET filter_mode = excluded.filter_mode
+                """,
+                (user_id, filter_mode),
+            )
+            await db.commit()
 
 
 db = Database()

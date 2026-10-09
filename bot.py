@@ -39,6 +39,14 @@ client = TelegramClient(
 )
 uploader = TelethonUploader(client)
 
+# File extension filters
+VIDEO_EXTENSIONS = {
+    ".mp4", ".mkv", ".webm", ".avi", ".mov", ".flv", ".wmv", ".m4v", ".ts", ".3gp", ".mpg", ".mpeg"
+}
+PHOTO_EXTENSIONS = {
+    ".jpg", ".jpeg", ".png", ".webp", ".gif", ".bmp", ".tiff", ".heic", ".heif"
+}
+
 
 def is_allowed_user(user_id: int) -> bool:
     """Check if user is authorized to use the bot."""
@@ -137,9 +145,17 @@ async def handle_help(event: events.NewMessage.Event):
     help_text = (
         "📖 **TeraBox Bot Commands & Usage**\n\n"
         "• `/start` - Start the bot & view system status\n"
+        "• `/filter [video|photo|all]` - Filter files in folders\n"
+        "• `/stop` or `/cancel` - Abort active download/upload\n"
         "• `/ping` - Check bot responsiveness & latency\n"
         "• `/help` - Show this help menu\n"
         "• `/broadcast <msg>` - (Admin only) Broadcast message to all users\n\n"
+        "🎯 **Smart Filtering Tips**:\n"
+        "• `/filter video` - Download only videos (.mp4, .mkv, etc.)\n"
+        "• `/filter photo` - Download only photos (.jpg, .png, etc.)\n"
+        "• `/filter all` - Reset to download all files\n"
+        "• You can also send a link with `video` or `photo`:\n"
+        "  `https://terabox.com/s/... video`\n\n"
         "🌐 **Supported Links**:\n"
         "`terabox.com`, `terabox.app`, `1024tera.com`, `4funbox.com`, `mirrobox.com`, `nephobox.com`, `tibibox.com` and all mirror domains.\n\n"
         f"⚙️ **Limits**: Files up to `{config.MAX_FILE_SIZE_MB}` MB. Files larger than this will be delivered as direct browser links."
@@ -160,6 +176,56 @@ async def handle_ping(event: events.NewMessage.Event):
     msg = await event.reply("🏓 **Pinging...**")
     latency_ms = int((time.monotonic() - t0) * 1000)
     await msg.edit(f"🏓 **Pong!** Latency: `{latency_ms} ms`")
+
+
+@client.on(events.NewMessage(pattern=r"^/(?:filter|only)(?:\s+(.*))?$", incoming=True, func=lambda e: not e.out))
+async def handle_filter(event: events.NewMessage.Event):
+    sender = await event.get_sender()
+    if not sender or getattr(sender, "bot", False):
+        return
+    user_id = event.sender_id
+    if not is_allowed_user(user_id):
+        return
+
+    arg = (event.pattern_match.group(1) or "").strip().lower()
+
+    if arg in ["video", "videos", "vid", "vids"]:
+        await db.set_user_filter(user_id, "video")
+        await event.reply(
+            "🎬 **Filter Updated: Videos Only**\n\n"
+            "From now on, the bot will **only download videos** (.mp4, .mkv, etc.) and skip all photos/thumbnails in folders.\n\n"
+            "💡 _To reset, type `/filter all`_"
+        )
+    elif arg in ["photo", "photos", "image", "images", "img", "pic", "pics"]:
+        await db.set_user_filter(user_id, "photo")
+        await event.reply(
+            "🖼️ **Filter Updated: Photos Only**\n\n"
+            "From now on, the bot will **only download photos/images** and skip all video files.\n\n"
+            "💡 _To reset, type `/filter all`_"
+        )
+    elif arg in ["all", "off", "reset", "none"]:
+        await db.set_user_filter(user_id, "all")
+        await event.reply(
+            "📁 **Filter Reset: All Files**\n\n"
+            "The bot will now download **all files** (videos + photos) without filtering."
+        )
+    else:
+        current = await db.get_user_filter(user_id)
+        current_label = {
+            "video": "🎬 Videos Only",
+            "photo": "🖼️ Photos Only",
+            "all": "📁 All Files (No Filter)",
+        }.get(current, "📁 All Files")
+        await event.reply(
+            f"🎯 **Current Filter Mode**: `{current_label}`\n\n"
+            "**How to change:**\n"
+            "• `/filter video` - Download only videos (.mp4, .mkv...)\n"
+            "• `/filter photo` - Download only photos (.jpg, .png...)\n"
+            "• `/filter all` - Download all files\n\n"
+            "💡 **Inline Shortcut:**\n"
+            "You can also attach it directly with any link:\n"
+            "`<terabox_link> video` or `<terabox_link> photo`"
+        )
 
 
 @client.on(events.NewMessage(pattern=r"^/broadcast(?:\s+([\s\S]+))?$", incoming=True, func=lambda e: not e.out))
@@ -213,7 +279,7 @@ async def download_thumbnail(thumb_url: str, output_path: Path) -> Optional[Path
     return None
 
 
-async def process_terabox_link(event: events.NewMessage.Event, url: str):
+async def process_terabox_link(event: events.NewMessage.Event, url: str, filter_mode: str = "all"):
     """Core pipeline for link resolution, queueing, downloading, and uploading."""
     user_id = event.sender_id
 
@@ -276,12 +342,30 @@ async def process_terabox_link(event: events.NewMessage.Event, url: str):
             await status_msg.edit(f"❌ **Unexpected Error** `[ERR-UNEXPECTED]`\n\n`{str(e)}`")
             return
 
+        raw_count = len(files)
+        # Apply Smart Extension Filtering
+        if filter_mode == "video":
+            files = [f for f in files if Path(f.file_name).suffix.lower() in VIDEO_EXTENSIONS]
+        elif filter_mode == "photo":
+            files = [f for f in files if Path(f.file_name).suffix.lower() in PHOTO_EXTENSIONS]
+
         total_files = len(files)
+
+        if total_files == 0:
+            type_label = "Videos" if filter_mode == "video" else "Photos"
+            await status_msg.edit(
+                f"⚠️ **No {type_label} Found!**\n\n"
+                f"This share contains **{raw_count} files**, but **0** matched your filter (`{filter_mode.upper()}`).\n\n"
+                f"💡 _Tip: Use `/filter all` or add `all` to download all files without filtering._"
+            )
+            return
+
         is_multi_file = total_files > 1
 
         if is_multi_file:
+            filter_badge = f"\n🎯 **Filter Active**: `{filter_mode.upper()} ONLY` ({total_files} of {raw_count} files selected)" if filter_mode != "all" else ""
             await status_msg.edit(
-                f"📂 **Discovered {total_files} files** in this share.\n"
+                f"📂 **Discovered {total_files} files** in this share.{filter_badge}\n"
                 "⏳ *Beginning smart batch download (Albums for small files, Standalone for large files)...*"
             )
             await asyncio.sleep(2)
@@ -489,9 +573,24 @@ async def handle_incoming_message(event: events.NewMessage.Event):
 
     # Process first found URL
     target_url = urls[0]
-    logger.info(f"Received download request from user {user_id}: {target_url[:50]}...")
+
+    # Check for inline filter cues in the message text
+    raw_lower = event.raw_text.lower()
+    words = raw_lower.split()
+    inline_filter = None
+    if any(w in words for w in ["video", "videos", "vid", "vids", "-v", "--video"]):
+        inline_filter = "video"
+    elif any(w in words for w in ["photo", "photos", "image", "images", "img", "pic", "pics", "-p", "--photo"]):
+        inline_filter = "photo"
+    elif any(w in words for w in ["all", "-a", "--all"]):
+        inline_filter = "all"
+
+    # Use inline filter if specified; otherwise load user's persistent default
+    active_filter = inline_filter if inline_filter else await db.get_user_filter(user_id)
+
+    logger.info(f"Received download request from user {user_id} [Filter: {active_filter}]: {target_url[:50]}...")
     
-    task = asyncio.create_task(process_terabox_link(event, target_url))
+    task = asyncio.create_task(process_terabox_link(event, target_url, filter_mode=active_filter))
     active_tasks[user_id] = task
     try:
         await task
