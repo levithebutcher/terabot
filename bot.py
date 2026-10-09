@@ -281,19 +281,27 @@ async def process_terabox_link(event: events.NewMessage.Event, url: str):
         MAX_FILES_PER_LINK = 100
         if total_files > MAX_FILES_PER_LINK:
             import io
-            await status_msg.edit(f"⏳ **Folder is too large!**\n\nThis folder contains **{total_files}** files.\nGenerating a text file with all Direct Download Links...")
+            await status_msg.edit(f"⏳ **Folder is too large!**\n\nThis folder contains **{total_files}** files.\nGenerating a bulk download file...")
             
+            # Create a readable list
             text_content = f"TeraBox Direct Links for: {url}\nTotal Files: {total_files}\n\n"
+            
+            # Create a raw URL list for ADM/IDM
+            raw_urls = ""
             for f_idx, f_obj in enumerate(files, 1):
                 text_content += f"[{f_idx}] {f_obj.file_name} ({f_obj.size_readable})\nLink: {f_obj.dlink}\n\n"
+                raw_urls += f"{f_obj.dlink}\n"
             
             file_bytes = io.BytesIO(text_content.encode("utf-8"))
-            file_bytes.name = "TeraBox_Direct_Links.txt"
+            file_bytes.name = "TeraBox_Links_Readable.txt"
+
+            raw_bytes = io.BytesIO(raw_urls.encode("utf-8"))
+            raw_bytes.name = "ADM_IDM_Bulk_Links.txt"
             
             await client.send_file(
                 entity=event.chat_id,
-                file=file_bytes,
-                caption=f"📁 **Too Many Files ({total_files})**\n\n✅ Here is a text file containing the **High-Speed Direct Download Links** for all {total_files} files! You can open it and copy the links.",
+                file=[file_bytes, raw_bytes],
+                caption=f"📁 **Too Many Files ({total_files})**\n\n✅ Here are your direct links!\n\n📲 **How to use on Mobile:**\nDownload the `ADM_IDM_Bulk_Links.txt` file, open **ADM (Advanced Download Manager)**, go to Menu -> Import -> From TXT. It will download all {total_files} files automatically!",
                 reply_to=event.message.id
             )
             await status_msg.delete()
