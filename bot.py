@@ -277,168 +277,151 @@ async def process_terabox_link(event: events.NewMessage.Event, url: str):
             return
 
         total_files = len(files)
-
         is_multi_file = total_files > 1
 
         if is_multi_file:
             await status_msg.edit(
                 f"📂 **Discovered {total_files} files** in this share.\n"
-                "⚠️ *Note: Folder and multi-file support is experimental.*\n"
-                "Beginning sequential download..."
+                "⏳ *Beginning smart batch download (Albums for small files, Standalone for large files)...*"
             )
             await asyncio.sleep(2)
 
-        # Step 2: Process each file sequentially
+        album_paths = []
+        album_captions = []
+        album_size = 0
+        ALBUM_MAX_SIZE = 100 * 1024 * 1024  # 100 MB max limit per album
+        ALBUM_MAX_ITEMS = 10
+
+        async def flush_album():
+            nonlocal album_paths, album_captions, album_size
+            if not album_paths:
+                return
+            try:
+                await status_msg.edit(f"📤 Uploading Album ({len(album_paths)} items) to Telegram...")
+                if config.PRIVATE_CHAT_ID:
+                    msgs = await client.send_file(config.PRIVATE_CHAT_ID, album_paths, caption=album_captions)
+                    await client.forward_messages(event.chat_id, msgs)
+                else:
+                    await client.send_file(event.chat_id, album_paths, caption=album_captions)
+            except Exception as e:
+                logger.error(f"Album upload failed: {e}")
+                
+            for p in album_paths:
+                try:
+                    if p.exists(): p.unlink()
+                except:
+                    pass
+            album_paths.clear()
+            album_captions.clear()
+            album_size = 0
+
+        # Step 2: Process each file
         for idx, file_obj in enumerate(files, 1):
             file_prefix = f"[{idx}/{total_files}] " if is_multi_file else ""
 
-            # Check File Size Limit
+            # Check Over-size (2GB limit)
             max_size_bytes = config.MAX_FILE_SIZE_MB * 1024 * 1024
             if file_obj.size > max_size_bytes:
+                await flush_album()
                 oversize_msg = (
-                    f"📦 **{file_obj.file_name}**\n\n"
-                    f"• **Size**: `{file_obj.size_readable}`\n"
-                    f"• **Direct Bot Upload Limit**: `{config.MAX_FILE_SIZE_MB}` MB\n\n"
-                    f"⚡ **Direct High-Speed Download Link**:\n"
+                    f"📄 **{file_obj.file_name}**\n\n"
+                    f"💾 **Size**: {file_obj.size_readable}\n"
+                    f"🛑 **Direct Bot Upload Limit**: {config.MAX_FILE_SIZE_MB} MB\n\n"
+                    f"⬇️ **Direct High-Speed Download Link**:\n"
                     f"[👉 Click Here to Download Directly]({file_obj.dlink})\n\n"
                     f"_Tip: Tap the link above to download at full speed in Chrome, ADM, or IDM._"
                 )
                 await event.reply(oversize_msg)
                 continue
 
-            # Cache Check (if PRIVATE_CHAT_ID is set)
-            file_key = file_obj.fs_id or f"{file_obj.file_name}_{file_obj.size}"
-            if config.PRIVATE_CHAT_ID:
-                cached = await db.get_cached_file(file_key)
-                if cached:
-                    channel_id, cached_msg_id = cached
-                    try:
-                        await status_msg.edit(f"⚡ {file_prefix}**Retrieved from instant cache!** Forwarding media...")
-                        await client.forward_messages(
-                            entity=event.chat_id,
-                            messages=cached_msg_id,
-                            from_peer=channel_id,
+            # If Large file (> 100MB) OR Single File -> Standalone Fast Upload
+            if file_obj.size > ALBUM_MAX_SIZE or not is_multi_file:
+                await flush_album()
+                
+                # Standalone download
+                last_edit_time = 0.0
+                async def download_progress(current: int, total: int, speed: float):
+                    nonlocal last_edit_time
+                    now = time.monotonic()
+                    if now - last_edit_time >= 3.0 or current == total:
+                        last_edit_time = now
+                        txt = render_progress_text(f"📥 {file_prefix}Downloading", file_obj.file_name, current, total, speed)
+                        try: await status_msg.edit(txt)
+                        except: pass
+
+                downloader = TeraBoxDownloader(connections=config.DOWNLOAD_STREAMS)
+                try:
+                    downloaded_file = await downloader.download_file(
+                        dlink=file_obj.dlink, filename=file_obj.file_name,
+                        expected_size=file_obj.size, progress_callback=download_progress
+                    )
+                except DownloadError as e:
+                    await status_msg.edit(f"❌ {file_prefix}**Download Failed**: {str(e)}")
+                    continue
+
+                # Upload File Standalone
+                last_upload_edit = 0.0
+                async def upload_progress(current: int, total: int, speed: float):
+                    nonlocal last_upload_edit
+                    now = time.monotonic()
+                    if now - last_upload_edit >= 3.5 or current == total:
+                        last_upload_edit = now
+                        txt = render_progress_text(f"📤 {file_prefix}Uploading to Telegram", file_obj.file_name, current, total, speed)
+                        try: await status_msg.edit(txt)
+                        except: pass
+
+                caption = f"📄 **{file_obj.file_name}**\n\n💾 **Size**: {file_obj.size_readable}\n"
+                if file_obj.duration > 0:
+                    caption += f"⏱ **Duration**: {format_duration(file_obj.duration)}\n"
+
+                try:
+                    if config.PRIVATE_CHAT_ID:
+                        channel_msg = await uploader.upload_media(
+                            chat_id=config.PRIVATE_CHAT_ID, file_path=downloaded_file,
+                            caption=caption, thumb_path=None, progress_callback=upload_progress
                         )
-                        continue
-                    except Exception as fwd_err:
-                        logger.warning(f"Failed to forward cached message {cached_msg_id}: {fwd_err}")
+                        await client.forward_messages(event.chat_id, channel_msg)
+                    else:
+                        await uploader.upload_media(
+                            chat_id=event.chat_id, file_path=downloaded_file,
+                            caption=caption, thumb_path=None, progress_callback=upload_progress
+                        )
+                except Exception as up_err:
+                    await event.reply(f"❌ {file_prefix}**Upload Failed**\n\n{str(up_err)}")
+                finally:
+                    if downloaded_file.exists(): downloaded_file.unlink()
+                continue
+                
+            # If Small File -> ALBUM LOGIC
+            if album_size + file_obj.size > ALBUM_MAX_SIZE or len(album_paths) >= ALBUM_MAX_ITEMS:
+                await flush_album()
 
-            # Throttled progress updater
             last_edit_time = 0.0
-
-            async def download_progress(current: int, total: int, speed: float):
+            async def download_progress_album(current: int, total: int, speed: float):
                 nonlocal last_edit_time
                 now = time.monotonic()
                 if now - last_edit_time >= 3.0 or current == total:
                     last_edit_time = now
-                    txt = render_progress_text(
-                        action=f"📥 {file_prefix}Downloading",
-                        filename=file_obj.file_name,
-                        current=current,
-                        total=total,
-                        speed=speed,
-                    )
-                    try:
-                        await status_msg.edit(txt)
-                    except FloodWaitError as fw:
-                        await asyncio.sleep(fw.seconds)
-                    except Exception:
-                        pass
+                    txt = render_progress_text(f"📥 {file_prefix}Downloading (Album Batch)", file_obj.file_name, current, total, speed)
+                    try: await status_msg.edit(txt)
+                    except: pass
 
-            # Download File
-            downloader = TeraBoxDownloader(connections=config.DOWNLOAD_STREAMS)
+            # Download small file
+            downloader = TeraBoxDownloader(connections=4)
             try:
                 downloaded_file = await downloader.download_file(
-                    dlink=file_obj.dlink,
-                    filename=file_obj.file_name,
-                    expected_size=file_obj.size,
-                    progress_callback=download_progress,
+                    dlink=file_obj.dlink, filename=file_obj.file_name,
+                    expected_size=file_obj.size, progress_callback=download_progress_album
                 )
+                album_paths.append(downloaded_file)
+                album_captions.append(f"📄 **{file_obj.file_name}**")
+                album_size += file_obj.size
             except DownloadError as e:
-                await status_msg.edit(f"❌ {file_prefix}**Download Failed**: `{str(e)}`")
+                await event.reply(f"❌ {file_prefix}**Download Failed**: {str(e)}")
                 continue
 
-            # Download remote thumbnail if available
-            thumb_path = None
-            if file_obj.thumb:
-                temp_thumb = config.DOWNLOAD_DIR / f"{downloaded_file.stem}_remote_thumb.jpg"
-                thumb_path = await download_thumbnail(file_obj.thumb, temp_thumb)
-
-            # Upload File
-            last_upload_edit = 0.0
-
-            async def upload_progress(current: int, total: int, speed: float):
-                nonlocal last_upload_edit
-                now = time.monotonic()
-                if now - last_upload_edit >= 3.5 or current == total:
-                    last_upload_edit = now
-                    txt = render_progress_text(
-                        action=f"📤 {file_prefix}Uploading to Telegram",
-                        filename=file_obj.file_name,
-                        current=current,
-                        total=total,
-                        speed=speed,
-                    )
-                    try:
-                        await status_msg.edit(txt)
-                    except FloodWaitError as fw:
-                        await asyncio.sleep(fw.seconds)
-                    except Exception:
-                        pass
-
-            caption = (
-                f"✨ **{file_obj.file_name}**\n\n"
-                f"💾 **Size**: `{file_obj.size_readable}`\n"
-            )
-            if file_obj.duration > 0:
-                caption += f"⏱ **Duration**: `{format_duration(file_obj.duration)}`\n"
-
-            try:
-                # If PRIVATE_CHAT_ID is enabled, upload to storage channel and forward to user
-                if config.PRIVATE_CHAT_ID:
-                    channel_msg = await uploader.upload_media(
-                        chat_id=config.PRIVATE_CHAT_ID,
-                        file_path=downloaded_file,
-                        caption=caption,
-                        thumb_path=None, # Fix squarish video
-                        progress_callback=upload_progress,
-                    )
-                    # Save to SQLite cache
-                    await db.save_cached_file(
-                        file_key=file_key,
-                        file_name=file_obj.file_name,
-                        file_size=file_obj.size,
-                        channel_id=config.PRIVATE_CHAT_ID,
-                        message_id=channel_msg.id,
-                    )
-                    # Forward to user
-                    await client.forward_messages(
-                        entity=event.chat_id,
-                        messages=channel_msg.id,
-                        from_peer=config.PRIVATE_CHAT_ID,
-                    )
-                else:
-                    # Upload directly to user
-                    await uploader.upload_media(
-                        chat_id=event.chat_id,
-                        file_path=downloaded_file,
-                        caption=caption,
-                        thumb_path=None, # Fix squarish video
-                        progress_callback=upload_progress,
-                    )
-
-            except Exception as up_err:
-                logger.error(f"[ERR-UPLOAD] Upload failed for {file_obj.file_name}: {up_err}", exc_info=True)
-                await event.reply(f"❌ {file_prefix}**Upload Failed** `[ERR-UPLOAD]`\n\n`{str(up_err)}`")
-            finally:
-                # Clean up local file and thumb
-                try:
-                    if downloaded_file.exists():
-                        downloaded_file.unlink()
-                    if thumb_path and thumb_path.exists():
-                        thumb_path.unlink()
-                except Exception as clean_err:
-                    logger.debug(f"Cleanup error: {clean_err}")
+        # Flush remaining album files
+        await flush_album()
 
         # Finish up
         if status_msg:
