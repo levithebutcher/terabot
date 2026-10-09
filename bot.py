@@ -277,6 +277,17 @@ async def process_terabox_link(event: events.NewMessage.Event, url: str):
             return
 
         total_files = len(files)
+        
+        MAX_FILES_PER_LINK = 100
+        if total_files > MAX_FILES_PER_LINK:
+            await status_msg.edit(
+                f"❌ **Too many files!**\n\n"
+                f"This folder contains **{total_files}** files.\n"
+                f"To prevent spam and server crashes, this bot can only process up to **{MAX_FILES_PER_LINK}** files per link.\n\n"
+                f"Please open the original link in your browser to view or download them."
+            )
+            return
+
         is_multi_file = total_files > 1
 
         if is_multi_file:
@@ -459,6 +470,18 @@ async def process_terabox_link(event: events.NewMessage.Event, url: str):
 
 # ---------------- MESSAGE DISPATCHER ---------------- #
 
+active_tasks: dict[int, asyncio.Task] = {}
+
+@client.on(events.NewMessage(pattern=r"(?i)^/(cancel|stop)$"))
+async def handle_cancel(event: events.NewMessage.Event):
+    user_id = event.sender_id
+    if user_id in active_tasks:
+        task = active_tasks.pop(user_id)
+        task.cancel()
+        await event.reply("✅ **Download/Upload stopped.**\nAll ongoing operations have been aborted.")
+    else:
+        await event.reply("❌ **No active tasks to stop.**")
+
 @client.on(events.NewMessage(incoming=True, func=lambda e: not e.out))
 async def handle_incoming_message(event: events.NewMessage.Event):
     # Ignore outgoing messages sent by the bot itself
@@ -494,7 +517,16 @@ async def handle_incoming_message(event: events.NewMessage.Event):
     # Process first found URL
     target_url = urls[0]
     logger.info(f"Received download request from user {user_id}: {target_url[:50]}...")
-    await process_terabox_link(event, target_url)
+    
+    task = asyncio.create_task(process_terabox_link(event, target_url))
+    active_tasks[user_id] = task
+    try:
+        await task
+    except asyncio.CancelledError:
+        pass
+    finally:
+        if active_tasks.get(user_id) == task:
+            del active_tasks[user_id]
 
 
 async def start_dummy_web_server():
