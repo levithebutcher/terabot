@@ -206,17 +206,25 @@ async def handle_filter(event: events.NewMessage.Event):
             "From now on, the bot will **only download photos/images** and skip all video files.\n\n"
             "💡 _To reset, type `/filter all`_"
         )
+    elif arg in ["other", "others", "doc", "docs", "zip"]:
+        await db.set_user_filter(user_id, "other")
+        await event.reply(
+            "📄 **Filter Updated: Other Files Only**\n\n"
+            "From now on, the bot will **only download other files** (archives, text, audio, docs) and skip photos and videos.\n\n"
+            "💡 _To reset, type `/filter all`_"
+        )
     elif arg in ["all", "off", "reset", "none"]:
         await db.set_user_filter(user_id, "all")
         await event.reply(
             "📁 **Filter Reset: All Files**\n\n"
-            "The bot will now download **all files** (videos + photos) without filtering."
+            "The bot will now download **all files** without filtering."
         )
     else:
         current = await db.get_user_filter(user_id)
         current_label = {
             "video": "🎬 Videos Only",
             "photo": "🖼️ Photos Only",
+            "other": "📄 Other Files Only",
             "all": "📁 All Files (No Filter)",
         }.get(current, "📁 All Files")
         await event.reply(
@@ -224,10 +232,11 @@ async def handle_filter(event: events.NewMessage.Event):
             "**How to change:**\n"
             "• `/filter video` - Download only videos (.mp4, .mkv...)\n"
             "• `/filter photo` - Download only photos (.jpg, .png...)\n"
+            "• `/filter other` - Download only other files (zip, txt, audio...)\n"
             "• `/filter all` - Download all files\n\n"
             "💡 **Inline Shortcut:**\n"
             "You can also attach it directly with any link:\n"
-            "`<terabox_link> video` or `<terabox_link> photo`"
+            "`<terabox_link> video` or `<terabox_link> photo` or `<terabox_link> other`"
         )
 
 
@@ -357,7 +366,8 @@ async def process_terabox_link(
         raw_count = len(files)
         video_files = [f for f in files if Path(f.file_name).suffix.lower() in VIDEO_EXTENSIONS]
         photo_files = [f for f in files if Path(f.file_name).suffix.lower() in PHOTO_EXTENSIONS]
-        other_count = raw_count - len(video_files) - len(photo_files)
+        other_files = [f for f in files if f not in video_files and f not in photo_files]
+        other_count = len(other_files)
 
         # Interactive Button Card: Prompt user if folder contains multiple items and no inline filter was specified
         if raw_count > 1 and not has_explicit_inline_filter:
@@ -375,10 +385,13 @@ async def process_terabox_link(
             if row1:
                 buttons.append(row1)
 
-            buttons.append([
-                Button.inline(f"📁 Download All ({raw_count})", data=f"act:all:{session_id}"),
-                Button.inline("❌ Cancel", data=f"act:cancel:{session_id}"),
-            ])
+            row2 = []
+            if other_count > 0:
+                row2.append(Button.inline(f"📄 Others ({other_count})", data=f"act:other:{session_id}"))
+            row2.append(Button.inline(f"📁 Download All ({raw_count})", data=f"act:all:{session_id}"))
+            buttons.append(row2)
+
+            buttons.append([Button.inline("❌ Cancel", data=f"act:cancel:{session_id}")])
 
             msg_text = (
                 f"📂 **Folder Discovered**\n\n"
@@ -410,6 +423,9 @@ async def process_terabox_link(
             elif chosen_action == "photo":
                 files = photo_files
                 filter_mode = "photo"
+            elif chosen_action == "other":
+                files = other_files
+                filter_mode = "other"
             else:
                 filter_mode = "all"
         else:
@@ -418,11 +434,17 @@ async def process_terabox_link(
                 files = video_files
             elif filter_mode == "photo":
                 files = photo_files
+            elif filter_mode == "other":
+                files = other_files
 
         total_files = len(files)
 
         if total_files == 0:
-            type_label = "Videos" if filter_mode == "video" else "Photos"
+            type_label = {
+                "video": "Videos",
+                "photo": "Photos",
+                "other": "Other Files",
+            }.get(filter_mode, "Files")
             await status_msg.edit(
                 f"⚠️ **No {type_label} Found!**\n\n"
                 f"This share contains **{raw_count} files**, but **0** matched your filter (`{filter_mode.upper()}`).\n\n"
@@ -611,7 +633,7 @@ async def process_terabox_link(
 active_tasks: dict[int, asyncio.Task] = {}
 pending_prompts: dict[str, tuple[int, asyncio.Future]] = {}
 
-@client.on(events.CallbackQuery(pattern=r"^act:(video|photo|all|cancel):([a-f0-9]+)$"))
+@client.on(events.CallbackQuery(pattern=r"^act:(video|photo|other|all|cancel):([a-f0-9]+)$"))
 async def handle_action_callback(event: events.CallbackQuery.Event):
     action = event.pattern_match.group(1).decode("utf-8")
     session_id = event.pattern_match.group(2).decode("utf-8")
@@ -631,7 +653,13 @@ async def handle_action_callback(event: events.CallbackQuery.Event):
         if action == "cancel":
             await event.answer("❌ Cancelled.", alert=False)
         else:
-            label = "Videos Only" if action == "video" else ("Photos Only" if action == "photo" else "All Files")
+            label_map = {
+                "video": "Videos Only",
+                "photo": "Photos Only",
+                "other": "Other Files Only",
+                "all": "All Files",
+            }
+            label = label_map.get(action, action.upper())
             await event.answer(f"🚀 Selected {label}!", alert=False)
 
 
@@ -707,6 +735,8 @@ async def handle_incoming_message(event: events.NewMessage.Event):
         inline_filter = "video"
     elif any(w in words for w in ["photo", "photos", "image", "images", "img", "pic", "pics", "-p", "--photo"]):
         inline_filter = "photo"
+    elif any(w in words for w in ["other", "others", "-o", "--other", "doc", "docs", "zip"]):
+        inline_filter = "other"
     elif any(w in words for w in ["all", "-a", "--all"]):
         inline_filter = "all"
 
