@@ -429,7 +429,7 @@ async def process_terabox_link(event: events.NewMessage.Event, url: str):
                         chat_id=config.PRIVATE_CHAT_ID,
                         file_path=downloaded_file,
                         caption=caption,
-                        thumb_path=thumb_path,
+                        thumb_path=None, # Fix squarish video
                         progress_callback=upload_progress,
                     )
                     # Save to SQLite cache
@@ -452,7 +452,7 @@ async def process_terabox_link(event: events.NewMessage.Event, url: str):
                         chat_id=event.chat_id,
                         file_path=downloaded_file,
                         caption=caption,
-                        thumb_path=thumb_path,
+                        thumb_path=None, # Fix squarish video
                         progress_callback=upload_progress,
                     )
 
