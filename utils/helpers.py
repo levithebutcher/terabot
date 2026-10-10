@@ -44,7 +44,14 @@ SUPPORTED_DOMAINS = [
     "bestclouddrive.com",
 ]
 
-DOMAIN_PATTERN = "|".join(re.escape(d) for d in SUPPORTED_DOMAINS)
+MEGA_DOMAINS = [
+    "mega.nz",
+    "mega.co.nz",
+    "mega.io",
+]
+
+ALL_SUPPORTED_DOMAINS = SUPPORTED_DOMAINS + MEGA_DOMAINS
+DOMAIN_PATTERN = "|".join(re.escape(d) for d in ALL_SUPPORTED_DOMAINS)
 URL_REGEX = re.compile(rf"https?://(?:[a-zA-Z0-9-]+\.)*(?:{DOMAIN_PATTERN})[^\s<>'\"\)]*", re.IGNORECASE)
 
 
@@ -58,14 +65,24 @@ def is_terabox_url(url: str) -> bool:
         return False
 
 
+def is_supported_url(url: str) -> bool:
+    """Check if the given URL belongs to a supported TeraBox or Mega domain."""
+    try:
+        parsed = urlparse(url)
+        netloc = parsed.netloc.lower()
+        return any(netloc == domain or netloc.endswith("." + domain) for domain in ALL_SUPPORTED_DOMAINS)
+    except Exception:
+        return False
+
+
 def extract_urls(text: str) -> list[str]:
-    """Find all valid TeraBox URLs inside a message text."""
+    """Find all valid TeraBox and Mega URLs inside a message text."""
     if not text:
         return []
     matches = URL_REGEX.findall(text)
     # Strip trailing punctuation marks
     cleaned = [m.rstrip(".,;:!?)]}") for m in matches]
-    return [url for url in cleaned if is_terabox_url(url)]
+    return [url for url in cleaned if is_supported_url(url)]
 
 
 def extract_surl(url: str) -> str | None:

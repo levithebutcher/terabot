@@ -4,12 +4,15 @@ FROM python:3.11-slim
 ENV PYTHONDONTWRITEBYTECODE=1
 ENV PYTHONUNBUFFERED=1
 
-# Install system dependencies (ffmpeg for video thumbnails, megatools for Mega downloads)
+# Install system dependencies (ffmpeg for video thumbnails, megatools and official megacmd for Mega)
 RUN apt-get update && apt-get install -y --no-install-recommends \
     ffmpeg \
     curl \
     ca-certificates \
     megatools \
+    && curl -fsSL https://mega.nz/linux/repo/Debian_12/amd64/megacmd-Debian_12_amd64.deb -o /tmp/megacmd.deb \
+    && (apt-get install -y --no-install-recommends /tmp/megacmd.deb || true) \
+    && rm -f /tmp/megacmd.deb \
     && rm -rf /var/lib/apt/lists/*
 
 # Set working directory

@@ -78,6 +78,18 @@ def detect_mega_engine() -> Tuple[Optional[str], Optional[list[str]]]:
     return None, None
 
 
+def normalize_mega_url_for_engine(url: str, engine_name: str) -> str:
+    """Ensure Mega URL format matches engine expectations (e.g. legacy #F! format for megatools)."""
+    if engine_name == "megatools":
+        m_folder = re.search(r"mega\.(?:nz|co\.nz|io)/folder/([a-zA-Z0-9_\-]+)#([a-zA-Z0-9_\-]+)", url)
+        if m_folder:
+            return f"https://mega.co.nz/#F!{m_folder.group(1)}!{m_folder.group(2)}"
+        m_file = re.search(r"mega\.(?:nz|co\.nz|io)/file/([a-zA-Z0-9_\-]+)#([a-zA-Z0-9_\-]+)", url)
+        if m_file:
+            return f"https://mega.co.nz/#!{m_file.group(1)}!{m_file.group(2)}"
+    return url
+
+
 async def process_mega_link(
     event: events.NewMessage.Event,
     url: str,
@@ -142,13 +154,14 @@ async def process_mega_link(
         else:
             await status_msg.edit("🔍 **Resolving Mega link...**", buttons=make_stop_btn(user_id))
 
-        # Build download command
+        # Build download command with normalized URL for engine
+        engine_url = normalize_mega_url_for_engine(url, engine_name)
         if engine_name == "mega-cmd":
-            cmd = base_cmd + [url, str(local_dir)]
+            cmd = base_cmd + [engine_url, str(local_dir)]
         else:  # megatools
-            cmd = base_cmd + ["--path", str(local_dir), url]
+            cmd = base_cmd + ["--path", str(local_dir), engine_url]
 
-        logger.info(f"Starting Mega download [{engine_name}] for user {user_id}: {url[:60]}")
+        logger.info(f"Starting Mega download [{engine_name}] for user {user_id}: {engine_url[:60]}")
         await status_msg.edit(f"📥 **Downloading from Mega...**\n`Engine: {engine_name}`", buttons=make_stop_btn(user_id))
 
         process = await asyncio.create_subprocess_exec(
