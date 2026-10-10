@@ -949,7 +949,7 @@ async def stream_and_upload_nodes(
         album_size = 0
         VIDEO_ALBUM_MAX_SIZE = 20 * 1024 * 1024   # 20 MB max per video in album
         PHOTO_ALBUM_MAX_SIZE = 100 * 1024 * 1024  # 100 MB max per photo in album
-        TOTAL_ALBUM_MAX_SIZE = 150 * 1024 * 1024  # 150 MB max combined batch
+        TOTAL_ALBUM_MAX_SIZE = 200 * 1024 * 1024  # 200 MB max combined batch (Full 10 x 20MB)
         ALBUM_MAX_ITEMS = 10
 
         async def flush_album():
