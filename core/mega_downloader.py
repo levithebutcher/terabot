@@ -1,16 +1,21 @@
 import asyncio
+import base64
+import json
 import os
 import re
 import shutil
+import struct
 import time
 import uuid
 from pathlib import Path
 from typing import Optional, Tuple
 
+import aiohttp
+import pyaes
 from telethon import Button, events
 
 import config
-from core.media import generate_video_thumbnail, get_video_metadata, is_photo_file, is_video_file
+from core.media import IMAGE_EXTENSIONS, VIDEO_EXTENSIONS, generate_video_thumbnail, get_video_metadata, is_photo_file, is_video_file
 from core.queue_manager import queue_mgr
 from core.uploader import TelethonUploader
 from utils.helpers import format_bytes, format_duration
@@ -27,6 +32,11 @@ MEGA_URL_REGEX = re.compile(
 def is_mega_url(url: str) -> bool:
     """Return True if the URL is a recognized Mega.nz file or folder link."""
     return bool(MEGA_URL_REGEX.search(url))
+
+
+def is_mega_folder_url(url: str) -> bool:
+    """Return True if the link points to a Mega folder."""
+    return bool(re.search(r"mega\.(?:nz|co\.nz|io)/(?:folder/|#F!)", url, re.IGNORECASE))
 
 
 def make_stop_btn(user_id: int):
@@ -90,6 +100,110 @@ def normalize_mega_url_for_engine(url: str, engine_name: str) -> str:
     return url
 
 
+# ---------------- FAST PRE-DOWNLOAD FOLDER INSPECTOR ---------------- #
+
+def _b64_dec(data: str) -> bytes:
+    data += "=" * ((4 - len(data) % 4) % 4)
+    return base64.urlsafe_b64decode(data)
+
+
+def _a32_to_str(a: tuple) -> bytes:
+    return struct.pack(">%dI" % len(a), *a)
+
+
+def _str_to_a32(b: bytes) -> tuple:
+    if len(b) % 4:
+        b += b"\0" * (4 - len(b) % 4)
+    return struct.unpack(">%dI" % (len(b) // 4), b)
+
+
+async def inspect_mega_folder(url: str) -> Optional[dict]:
+    """
+    Inspect a public Mega folder via Mega API in pure Python in seconds.
+    Returns folder file count, categorized into videos, photos, others, and total size
+    BEFORE downloading a single byte to disk.
+    """
+    m = re.search(r"mega\.(?:nz|co\.nz|io)/(?:folder/|#F!)([a-zA-Z0-9_\-]+)[#!]([a-zA-Z0-9_\-]+)", url)
+    if not m:
+        return None
+
+    folder_id, folder_key = m.group(1), m.group(2)
+    api_url = f"https://g.api.mega.co.nz/cs?id=0&n={folder_id}"
+    payload = json.dumps([{"a": "f", "c": 1, "ca": 1, "r": 1}])
+
+    try:
+        timeout = aiohttp.ClientTimeout(total=20)
+        async with aiohttp.ClientSession(timeout=timeout) as session:
+            async with session.post(api_url, data=payload, headers={"Content-Type": "application/json"}) as resp:
+                if resp.status != 200:
+                    return None
+                raw = await resp.json()
+
+        if not raw or not isinstance(raw, list) or "f" not in raw[0]:
+            return None
+
+        nodes = raw[0]["f"]
+        folder_key_bytes = _b64_dec(folder_key)
+        aes_ecb = pyaes.AESModeOfOperationECB(folder_key_bytes)
+
+        videos = []
+        photos = []
+        others = []
+
+        for node in nodes:
+            if node.get("t") != 0:  # Skip directories
+                continue
+            k_parts = node.get("k", "").split(":")
+            if len(k_parts) < 2:
+                continue
+
+            try:
+                enc_k = _b64_dec(k_parts[1])
+                dec_k = aes_ecb.decrypt(enc_k[:16]) + aes_ecb.decrypt(enc_k[16:32])
+                k_a32 = _str_to_a32(dec_k)
+                file_key = _a32_to_str(
+                    (k_a32[0] ^ k_a32[4], k_a32[1] ^ k_a32[5], k_a32[2] ^ k_a32[6], k_a32[3] ^ k_a32[7])
+                )
+
+                enc_attr = _b64_dec(node["a"])
+                aes_cbc = pyaes.AESModeOfOperationCBC(file_key, iv=b"\0" * 16)
+                dec_attr = b"".join(aes_cbc.decrypt(enc_attr[i : i + 16]) for i in range(0, len(enc_attr), 16))
+
+                m_json = re.search(b"MEGA({.+?})", dec_attr)
+                if not m_json:
+                    continue
+                attr = json.loads(m_json.group(1).decode("utf-8", errors="ignore"))
+                name = attr.get("n", "")
+                size = node.get("s", 0)
+                ext = ("." + name.split(".")[-1].lower()) if "." in name else ""
+
+                item = {"name": name, "size": size}
+                if ext in VIDEO_EXTENSIONS:
+                    videos.append(item)
+                elif ext in IMAGE_EXTENSIONS:
+                    photos.append(item)
+                else:
+                    others.append(item)
+            except Exception:
+                continue
+
+        total_files = len(videos) + len(photos) + len(others)
+        total_size = sum(f["size"] for f in videos + photos + others)
+
+        return {
+            "total_files": total_files,
+            "videos": videos,
+            "photos": photos,
+            "others": others,
+            "total_size": total_size,
+        }
+    except Exception as e:
+        logger.warning(f"Error inspecting Mega folder via API: {e}")
+        return None
+
+
+# ---------------- MAIN MEGA PROCESSOR ---------------- #
+
 async def process_mega_link(
     event: events.NewMessage.Event,
     url: str,
@@ -99,8 +213,8 @@ async def process_mega_link(
 ):
     """
     Handle downloading from Mega.nz (file or folder) and uploading to Telegram.
-    Includes Smart Folder Filter buttons, Smart Album grouping, live progress,
-    cancellation support, quota handling, and guaranteed disk cleanup.
+    Inspects folders in advance, prompts Smart Action Buttons BEFORE downloading,
+    batches photos into Smart Albums, and streams updates with live speed & ETA.
     """
     user_id = event.sender_id
     status_msg = None
@@ -144,15 +258,96 @@ async def process_mega_link(
                 await event.reply(err_msg)
             return
 
-        # Prepare isolated download directory
-        safe_id = f"{int(time.time())}_{user_id}"
-        local_dir = config.DOWNLOAD_DIR / f"mega_{safe_id}"
-        local_dir.mkdir(parents=True, exist_ok=True)
-
         if not status_msg:
             status_msg = await event.reply("🔍 **Resolving Mega link...**", buttons=make_stop_btn(user_id))
         else:
             await status_msg.edit("🔍 **Resolving Mega link...**", buttons=make_stop_btn(user_id))
+
+        # ---------------- PRE-DOWNLOAD FOLDER INSPECTION & SMART BUTTONS ---------------- #
+        if is_mega_folder_url(url):
+            await status_msg.edit("📂 **Inspecting Mega folder contents...**", buttons=make_stop_btn(user_id))
+            folder_info = await inspect_mega_folder(url)
+
+            if folder_info and folder_info["total_files"] > 1:
+                raw_count = folder_info["total_files"]
+                num_videos = len(folder_info["videos"])
+                num_photos = len(folder_info["photos"])
+                num_others = len(folder_info["others"])
+                total_sz_readable = format_bytes(folder_info["total_size"])
+
+                # If no explicit inline filter was provided, present the interactive buttons FIRST
+                if not has_explicit_inline_filter and pending_prompts is not None:
+                    session_id = uuid.uuid4().hex[:8]
+                    loop = asyncio.get_running_loop()
+                    future = loop.create_future()
+                    pending_prompts[session_id] = (user_id, future)
+
+                    buttons = []
+                    row1 = []
+                    if num_videos > 0:
+                        row1.append(Button.inline(f"🎬 Only Videos ({num_videos})", data=f"act:video:{session_id}"))
+                    if num_photos > 0:
+                        row1.append(Button.inline(f"🖼️ Only Photos ({num_photos})", data=f"act:photo:{session_id}"))
+                    if row1:
+                        buttons.append(row1)
+
+                    row2 = []
+                    if num_others > 0:
+                        row2.append(Button.inline(f"📄 Others ({num_others})", data=f"act:other:{session_id}"))
+                    row2.append(Button.inline(f"📁 Download All ({raw_count})", data=f"act:all:{session_id}"))
+                    buttons.append(row2)
+
+                    buttons.append([Button.inline("❌ Cancel", data=f"act:cancel:{session_id}")])
+
+                    msg_text = (
+                        f"📂 **Folder Discovered (Mega.nz)**\n\n"
+                        f"📊 **Total Files**: `{raw_count}` (`{total_sz_readable}`)\n"
+                        f"• 🎬 **Videos**: `{num_videos}`\n"
+                        f"• 🖼️ **Photos**: `{num_photos}`\n"
+                    )
+                    if num_others > 0:
+                        msg_text += f"• 📄 **Other Files**: `{num_others}`\n"
+                    msg_text += "\n👇 **Aapko kya download karna hai? Choose karo:**"
+
+                    await status_msg.edit(msg_text, buttons=buttons)
+
+                    try:
+                        chosen_action = await asyncio.wait_for(future, timeout=300)
+                    except asyncio.TimeoutError:
+                        await status_msg.edit("⏱️ **Selection timed out (5 min).** Please resend link if needed.", buttons=None)
+                        return
+                    finally:
+                        pending_prompts.pop(session_id, None)
+
+                    if chosen_action == "cancel":
+                        await status_msg.edit("❌ **Download cancelled by user.**", buttons=None)
+                        return
+
+                    filter_mode = chosen_action
+                else:
+                    # User passed inline filter like 'mega.nz/... video'
+                    pass
+
+                # Check if chosen filter has 0 files
+                if filter_mode == "video" and num_videos == 0:
+                    await status_msg.edit(
+                        f"⚠️ **No Videos Found!**\nThis folder contains {raw_count} files, but 0 are videos.\n\n"
+                        "💡 _Use 'all' to download everything without filtering._",
+                        buttons=None,
+                    )
+                    return
+                elif filter_mode == "photo" and num_photos == 0:
+                    await status_msg.edit(
+                        f"⚠️ **No Photos Found!**\nThis folder contains {raw_count} files, but 0 are photos.\n\n"
+                        "💡 _Use 'all' to download everything without filtering._",
+                        buttons=None,
+                    )
+                    return
+
+        # Prepare isolated download directory
+        safe_id = f"{int(time.time())}_{user_id}"
+        local_dir = config.DOWNLOAD_DIR / f"mega_{safe_id}"
+        local_dir.mkdir(parents=True, exist_ok=True)
 
         # Build download command with normalized URL for engine
         engine_url = normalize_mega_url_for_engine(url, engine_name)
@@ -161,8 +356,12 @@ async def process_mega_link(
         else:  # megatools
             cmd = base_cmd + ["--path", str(local_dir), engine_url]
 
-        logger.info(f"Starting Mega download [{engine_name}] for user {user_id}: {engine_url[:60]}")
-        await status_msg.edit(f"📥 **Downloading from Mega...**\n`Engine: {engine_name}`", buttons=make_stop_btn(user_id))
+        filter_badge = f" [Filter: {filter_mode.upper()}]" if filter_mode != "all" else ""
+        logger.info(f"Starting Mega download [{engine_name}] for user {user_id}{filter_badge}: {engine_url[:60]}")
+        await status_msg.edit(
+            f"📥 **Downloading from Mega...**{filter_badge}\n`Engine: {engine_name}`",
+            buttons=make_stop_btn(user_id),
+        )
 
         process = await asyncio.create_subprocess_exec(
             *cmd,
@@ -197,7 +396,7 @@ async def process_mega_link(
                         last_edit = now
                         progress_txt = render_mega_progress(
                             action="📥 Downloading from Mega",
-                            name=f"Engine: {engine_name}",
+                            name=f"Engine: {engine_name}{filter_badge}",
                             current=total_bytes,
                             total=0,
                             speed=max(0.0, speed),
@@ -217,7 +416,7 @@ async def process_mega_link(
 
         # Check return code & parse errors
         if process.returncode != 0:
-            err_output = (stderr.decode().strip() or stdout.decode().strip())
+            err_output = stderr.decode().strip() or stdout.decode().strip()
             logger.error(f"Mega download failed (code {process.returncode}): {err_output}")
 
             if any(term in err_output.lower() for term in ["bandwidth quota", "transfer quota", "error -17", "509"]):
@@ -246,110 +445,23 @@ async def process_mega_link(
                 )
             return
 
-        # Locate downloaded files (supporting both single files and recursive folders)
+        # Locate downloaded files on disk
         all_downloaded = sorted([f for f in local_dir.rglob("*") if f.is_file() and not f.name.startswith(".")])
         if not all_downloaded:
             await status_msg.edit("❌ **No files found in the downloaded Mega link.**", buttons=None)
             return
 
-        raw_count = len(all_downloaded)
-
-        # Categorize files
-        video_files = [f for f in all_downloaded if is_video_file(f)]
-        photo_files = [f for f in all_downloaded if is_photo_file(f)]
-        other_files = [f for f in all_downloaded if f not in video_files and f not in photo_files]
-        other_count = len(other_files)
-
-        files_to_upload = all_downloaded
-
-        # ---------------- SMART ACTION BUTTONS (MULTI-FILE FOLDERS) ---------------- #
-        if raw_count > 1 and not has_explicit_inline_filter and pending_prompts is not None:
-            session_id = uuid.uuid4().hex[:8]
-            loop = asyncio.get_running_loop()
-            future = loop.create_future()
-            pending_prompts[session_id] = (user_id, future)
-
-            buttons = []
-            row1 = []
-            if len(video_files) > 0:
-                row1.append(Button.inline(f"🎬 Only Videos ({len(video_files)})", data=f"act:video:{session_id}"))
-            if len(photo_files) > 0:
-                row1.append(Button.inline(f"🖼️ Only Photos ({len(photo_files)})", data=f"act:photo:{session_id}"))
-            if row1:
-                buttons.append(row1)
-
-            row2 = []
-            if other_count > 0:
-                row2.append(Button.inline(f"📄 Others ({other_count})", data=f"act:other:{session_id}"))
-            row2.append(Button.inline(f"📁 Download All ({raw_count})", data=f"act:all:{session_id}"))
-            buttons.append(row2)
-
-            buttons.append([Button.inline("❌ Cancel", data=f"act:cancel:{session_id}")])
-
-            msg_text = (
-                f"📂 **Folder Discovered (Mega.nz)**\n\n"
-                f"📊 **Total Files**: `{raw_count}`\n"
-                f"• 🎬 **Videos**: `{len(video_files)}`\n"
-                f"• 🖼️ **Photos**: `{len(photo_files)}`\n"
-            )
-            if other_count > 0:
-                msg_text += f"• 📄 **Other Files**: `{other_count}`\n"
-            msg_text += "\n👇 **Aapko kya download karna hai? Choose karo:**"
-
-            await status_msg.edit(msg_text, buttons=buttons)
-
-            try:
-                chosen_action = await asyncio.wait_for(future, timeout=300)
-            except asyncio.TimeoutError:
-                await status_msg.edit("⏱️ **Selection timed out (5 min).** Please resend link if needed.", buttons=None)
-                return
-            finally:
-                pending_prompts.pop(session_id, None)
-
-            if chosen_action == "cancel":
-                await status_msg.edit("❌ **Download cancelled by user.**", buttons=None)
-                return
-
-            if chosen_action == "video":
-                files_to_upload = video_files
-                filter_mode = "video"
-            elif chosen_action == "photo":
-                files_to_upload = photo_files
-                filter_mode = "photo"
-            elif chosen_action == "other":
-                files_to_upload = other_files
-                filter_mode = "other"
-            else:
-                files_to_upload = all_downloaded
-                filter_mode = "all"
+        # Apply filtering to downloaded files
+        if filter_mode == "video":
+            files_to_upload = [f for f in all_downloaded if is_video_file(f)]
+        elif filter_mode == "photo":
+            files_to_upload = [f for f in all_downloaded if is_photo_file(f)]
+        elif filter_mode == "other":
+            files_to_upload = [f for f in all_downloaded if not is_video_file(f) and not is_photo_file(f)]
         else:
-            # Inline filter specified or default filter active
-            if filter_mode == "video":
-                files_to_upload = video_files
-            elif filter_mode == "photo":
-                files_to_upload = photo_files
-            elif filter_mode == "other":
-                files_to_upload = other_files
-            else:
-                files_to_upload = all_downloaded
+            files_to_upload = all_downloaded
 
-        # Check if filter resulted in 0 files
-        total_files = len(files_to_upload)
-        if total_files == 0:
-            type_label = {
-                "video": "Videos",
-                "photo": "Photos",
-                "other": "Other Files",
-            }.get(filter_mode, "Files")
-            await status_msg.edit(
-                f"⚠️ **No {type_label} Found!**\n\n"
-                f"This share contains **{raw_count} files**, but **0** matched your filter (`{filter_mode.upper()}`).\n\n"
-                f"💡 _Tip: Use `/filter all` or add `all` to download all files without filtering._",
-                buttons=None,
-            )
-            return
-
-        # Delete unused filtered-out files from local disk immediately to free space
+        # Delete unused filtered-out files immediately from disk to save storage
         for f in all_downloaded:
             if f not in files_to_upload:
                 try:
@@ -357,13 +469,22 @@ async def process_mega_link(
                 except Exception:
                     pass
 
+        total_files = len(files_to_upload)
+        if total_files == 0:
+            type_label = {"video": "Videos", "photo": "Photos", "other": "Other Files"}.get(filter_mode, "Files")
+            await status_msg.edit(
+                f"⚠️ **No {type_label} Found!**\nNo files matched your filter (`{filter_mode.upper()}`).",
+                buttons=None,
+            )
+            return
+
         total_size = sum(f.stat().st_size for f in files_to_upload)
         is_multi_file = total_files > 1
 
         if is_multi_file:
-            filter_badge = f"\n🎯 **Filter Active**: `{filter_mode.upper()} ONLY` ({total_files} of {raw_count} files selected)" if filter_mode != "all" else ""
+            filter_badge_text = f"\n🎯 **Filter Active**: `{filter_mode.upper()} ONLY` ({total_files} files selected)" if filter_mode != "all" else ""
             await status_msg.edit(
-                f"📂 **Processing {total_files} files** in this Mega share.{filter_badge}\n"
+                f"📂 **Processing {total_files} files** in this Mega share.{filter_badge_text}\n"
                 "⏳ *Beginning smart batch upload...*",
                 buttons=make_stop_btn(user_id),
             )
@@ -551,7 +672,7 @@ async def process_mega_link(
             except Exception:
                 pass
         # Guaranteed disk cleanup
-        if 'local_dir' in locals() and local_dir.exists():
+        if "local_dir" in locals() and local_dir.exists():
             shutil.rmtree(local_dir, ignore_errors=True)
         if slot_acquired:
             queue_mgr.release_worker(user_id)
