@@ -27,7 +27,7 @@ from core.resolver import (
     TeraFile,
 )
 from core.uploader import TelethonUploader
-from core.mega_downloader import is_mega_url, process_mega_link
+from core.mega_downloader import is_mega_url, process_mega_link, mega_mgr, set_active_tasks_ref
 from utils.helpers import extract_urls, format_bytes, format_duration
 from utils.jokes import can_send_joke, get_random_joke
 from utils.logger import logger
@@ -641,7 +641,12 @@ async def process_terabox_link(
 # ---------------- MESSAGE DISPATCHER & CALLBACKS ---------------- #
 
 active_tasks: dict[int, asyncio.Task] = {}
+set_active_tasks_ref(active_tasks)
 pending_prompts: dict[str, tuple[int, asyncio.Future]] = {}
+
+@client.on(events.CallbackQuery(pattern=r"^m_(nav|dir|act|allact|home|srch|cancel|reopen):"))
+async def handle_mega_explorer_callback(event: events.CallbackQuery.Event):
+    await mega_mgr.handle_callback(event, client, active_tasks)
 
 @client.on(events.CallbackQuery(pattern=r"^act:(video|photo|other|all|cancel):([a-f0-9]+)$"))
 async def handle_action_callback(event: events.CallbackQuery.Event):
@@ -731,6 +736,11 @@ async def handle_incoming_message(event: events.NewMessage.Event):
 
     urls = extract_urls(event.raw_text)
     if not urls:
+        # Check if user is replying to Mega folder search prompt
+        if mega_mgr.has_awaiting_search(user_id):
+            await mega_mgr.handle_search_input(event)
+            return
+
         # User sent normal chat banter without any link!
         if can_send_joke(user_id):
             joke = get_random_joke()
