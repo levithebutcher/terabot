@@ -3,6 +3,7 @@
 cookie.env/
 cookies*.txt
 *.env
+*_prefilled.ipynb
 _research/
 *.part
 

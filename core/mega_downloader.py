@@ -947,6 +947,7 @@ async def stream_and_upload_nodes(
         album_paths = []
         album_captions = []
         album_size = 0
+        VIDEO_ALBUM_MAX_SIZE = 20 * 1024 * 1024   # 20 MB max per video in album
         PHOTO_ALBUM_MAX_SIZE = 100 * 1024 * 1024  # 100 MB max per photo in album
         TOTAL_ALBUM_MAX_SIZE = 200 * 1024 * 1024  # 200 MB max combined batch
         ALBUM_MAX_ITEMS = 10
@@ -958,28 +959,35 @@ async def stream_and_upload_nodes(
 
             last_album_edit = 0.0
             album_count = len(album_paths)
+            item_label = "items"
+            if all(is_photo_file(p) for p in album_paths):
+                item_label = "photos"
+            elif all(is_video_file(p) for p in album_paths):
+                item_label = "videos"
 
-            async def album_item_progress(item_idx: int, total_items: int, curr: int, tot: int, spd: float, item_name: str):
+            def album_item_progress(current, total):
                 nonlocal last_album_edit
                 now = time.monotonic()
-                if now - last_album_edit >= 2.0 or curr == tot:
+                if now - last_album_edit >= 2.0 or current >= total:
                     last_album_edit = now
-                    txt = render_mega_progress(
-                        action=f"📤 Uploading Album [{item_idx}/{total_items}]",
-                        name=item_name,
-                        current=curr,
-                        total=tot,
-                        speed=spd,
+                    pct = (current / total) * 100.0 if total > 0 else 0.0
+                    bar_w = 12
+                    filled = min(bar_w, int(bar_w * current // total)) if total > 0 else 0
+                    bar = "▰" * filled + "▱" * (bar_w - filled)
+                    txt = (
+                        f"📤 **Uploading Album ({album_count} {item_label}) to Telegram**\n\n"
+                        f"[{bar}] **{pct:.1f}%** ({int(current)}/{total} files)\n"
+                        f"⚡ *Sending high-speed album batch...*"
                     )
                     try:
-                        await status_msg.edit(txt, buttons=make_stop_btn(user_id))
+                        asyncio.create_task(status_msg.edit(txt, buttons=make_stop_btn(user_id)))
                     except Exception:
                         pass
 
             try:
                 await status_msg.edit(
-                    f"📤 **Uploading Photo Album ({album_count} photos) to Telegram...**\n"
-                    f"⚡ *Pre-uploading with 16 parallel workers...*",
+                    f"📤 **Uploading Album ({album_count} {item_label}) to Telegram...**\n"
+                    f"⚡ *Processing batch of {album_count} files...*",
                     buttons=make_stop_btn(user_id),
                 )
                 msgs = await uploader.upload_album(
@@ -987,11 +995,12 @@ async def stream_and_upload_nodes(
                     file_paths=album_paths,
                     captions=album_captions,
                     progress_callback=album_item_progress,
-                    workers=16,
+                    workers=10,
                 )
                 if config.PRIVATE_CHAT_ID and msgs:
                     await event.client.forward_messages(event.chat_id, msgs)
 
+                # Delete successfully uploaded files
                 for p in album_paths:
                     try:
                         if p.exists():
@@ -1009,7 +1018,7 @@ async def stream_and_upload_nodes(
                             file_path=p,
                             caption=cap,
                             progress_callback=None,
-                            workers=16,
+                            workers=10,
                         )
                         if config.PRIVATE_CHAT_ID and sent:
                             await event.client.forward_messages(event.chat_id, sent)
@@ -1047,6 +1056,26 @@ async def stream_and_upload_nodes(
                         f"⚠️ Exceeds Telegram's 2000 MB bot limit and was skipped."
                     )
                     continue
+
+                # Pre-download batch management:
+                node_ext = ("." + node["name"].split(".")[-1].lower()) if "." in node.get("name", "") else ""
+                node_is_photo = node_ext in IMAGE_EXTENSIONS
+                node_is_video = node_ext in VIDEO_EXTENSIONS
+                incoming_can_album = (
+                    is_multi_file
+                    and (
+                        (node_is_photo and file_size <= PHOTO_ALBUM_MAX_SIZE)
+                        or (node_is_video and file_size <= VIDEO_ALBUM_MAX_SIZE)
+                    )
+                )
+
+                # If this incoming file is standalone, flush any pending album batch first
+                if not incoming_can_album and album_paths:
+                    await flush_album()
+
+                # If album batch is already at 10 items or 200MB, upload that batch first before downloading this next file!
+                if incoming_can_album and (len(album_paths) >= ALBUM_MAX_ITEMS or album_size + file_size > TOTAL_ALBUM_MAX_SIZE):
+                    await flush_album()
 
                 dest_path = local_dir / file_name
                 if dest_path.exists():
@@ -1088,22 +1117,27 @@ async def stream_and_upload_nodes(
                 is_photo = is_photo_file(dest_path)
                 is_video = is_video_file(dest_path)
 
-                # Photo Album Eligibility (Only photos are grouped into albums; all videos & docs upload standalone!)
+                # Album Eligibility: Photos <= 100MB, Videos <= 20MB
                 can_be_album_item = (
                     is_multi_file
-                    and is_photo
-                    and actual_size <= PHOTO_ALBUM_MAX_SIZE
+                    and (
+                        (is_photo and actual_size <= PHOTO_ALBUM_MAX_SIZE)
+                        or (is_video and actual_size <= VIDEO_ALBUM_MAX_SIZE)
+                    )
                 )
 
                 if can_be_album_item:
-                    if album_size + actual_size > TOTAL_ALBUM_MAX_SIZE or len(album_paths) >= ALBUM_MAX_ITEMS:
-                        await flush_album()
                     album_paths.append(dest_path)
-                    album_captions.append(f"🖼️ **{dest_path.name}**\n☁️ `Mega.nz` • `{folder_name}`")
+                    icon = "🎬" if is_video else "🖼️"
+                    album_captions.append(f"{icon} **{dest_path.name}**\n☁️ `Mega.nz` • `{folder_name}`")
                     album_size += actual_size
+
+                    # If batch reached 10 items or 200MB, upload this completed batch immediately!
+                    if len(album_paths) >= ALBUM_MAX_ITEMS or album_size >= TOTAL_ALBUM_MAX_SIZE:
+                        await flush_album()
                     continue
 
-                # Standalone media upload (All Videos, Documents, Archives, or Single Files)
+                # Standalone media upload (Videos > 20MB, Documents, Archives, or Single Files)
                 await flush_album()
 
                 thumb_path = None
@@ -1148,7 +1182,7 @@ async def stream_and_upload_nodes(
                     caption=caption,
                     thumb_path=thumb_path,
                     progress_callback=upload_progress,
-                    workers=16,
+                    workers=10,
                 )
 
                 if config.PRIVATE_CHAT_ID and sent_msg:

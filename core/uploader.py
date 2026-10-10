@@ -19,7 +19,7 @@ async def fast_upload_file(
     client: TelegramClient,
     file_path: Path,
     part_size_kb: int = 512,
-    workers: int = 16,
+    workers: int = 10,
     progress_callback: Optional[Callable[[int, int, float], None]] = None,
     max_retries: int = 3,
 ) -> types.TypeInputFile:
@@ -48,6 +48,7 @@ async def fast_upload_file(
     start_time = time.monotonic()
     last_callback_time = start_time
     last_callback_bytes = 0
+    smoothed_speed = 0.0
     lock = asyncio.Lock()
     md5_hash = hashlib.md5() if not is_big else None
 
@@ -58,7 +59,7 @@ async def fast_upload_file(
                 md5_hash.update(chunk)
 
     async def worker_loop():
-        nonlocal uploaded_bytes, last_callback_time, last_callback_bytes
+        nonlocal uploaded_bytes, last_callback_time, last_callback_bytes, smoothed_speed
 
         # Open dedicated read handle per worker
         with open(file_path, "rb") as f:
@@ -105,17 +106,18 @@ async def fast_upload_file(
                     uploaded_bytes += length
                     now = time.monotonic()
                     elapsed = now - last_callback_time
-                    if progress_callback and (elapsed >= 2.0 or uploaded_bytes >= file_size):
+                    if progress_callback and (elapsed >= 1.5 or uploaded_bytes >= file_size):
                         bytes_diff = uploaded_bytes - last_callback_bytes
-                        speed = bytes_diff / elapsed if elapsed > 0 else 0.0
+                        instant_speed = bytes_diff / elapsed if elapsed > 0 else 0.0
+                        smoothed_speed = (0.7 * instant_speed + 0.3 * smoothed_speed) if smoothed_speed > 0 else instant_speed
                         last_callback_time = now
                         last_callback_bytes = uploaded_bytes
 
                         try:
                             if asyncio.iscoroutinefunction(progress_callback):
-                                await progress_callback(uploaded_bytes, file_size, speed)
+                                await progress_callback(uploaded_bytes, file_size, smoothed_speed)
                             else:
-                                progress_callback(uploaded_bytes, file_size, speed)
+                                progress_callback(uploaded_bytes, file_size, smoothed_speed)
                         except Exception:
                             pass
 
@@ -159,7 +161,7 @@ class TelethonUploader:
         thumb_path: Optional[Path] = None,
         progress_callback: Optional[Callable[[int, int, float], None]] = None,
         max_retries: int = 3,
-        workers: int = 16,
+        workers: int = 10,
     ):
         """
         Upload file using multi-connection fast parallel chunk transfer.
@@ -254,51 +256,52 @@ class TelethonUploader:
         captions: list[str],
         progress_callback: Optional[Callable] = None,
         max_retries: int = 3,
-        workers: int = 16,
+        workers: int = 10,
     ):
         """
-        Fast parallel album uploader for Telethon.
-        Pre-uploads all files in parallel chunks with live progress tracking,
-        then transmits the entire album as an atomic group.
+        Send a media album (photos, videos, or mixed) to Telegram.
+        Supports native streaming, thumbnail generation, and album progress tracking.
         """
-        if not file_paths:
+        valid_paths = [fp for fp in file_paths if fp.exists()]
+        if not valid_paths:
             return None
 
-        uploaded_inputs = []
-        total_items = len(file_paths)
-        for idx, fp in enumerate(file_paths, 1):
-            if not fp.exists():
-                continue
+        caps = captions[: len(valid_paths)] if captions else [""] * len(valid_paths)
+        while len(caps) < len(valid_paths):
+            caps.append("")
 
-            async def file_progress(curr: int, tot: int, spd: float, item_idx=idx, item_name=fp.name):
-                if progress_callback:
-                    try:
-                        if asyncio.iscoroutinefunction(progress_callback):
-                            await progress_callback(item_idx, total_items, curr, tot, spd, item_name)
-                        else:
-                            progress_callback(item_idx, total_items, curr, tot, spd, item_name)
-                    except TypeError:
-                        if asyncio.iscoroutinefunction(progress_callback):
-                            await progress_callback(curr, tot, spd)
-                        else:
-                            progress_callback(curr, tot, spd)
-
-            input_file = await fast_upload_file(
-                client=self.client,
-                file_path=fp,
-                part_size_kb=512,
+        # If only 1 file in batch, upload standalone with full streaming & custom thumbnail
+        if len(valid_paths) == 1:
+            msg = await self.upload_media(
+                chat_id=chat_id,
+                file_path=valid_paths[0],
+                caption=caps[0],
+                progress_callback=None,
                 workers=workers,
-                progress_callback=file_progress if progress_callback else None,
-                max_retries=max_retries,
             )
+            return [msg] if msg else []
 
-            uploaded_inputs.append(input_file)
-
-        if not uploaded_inputs:
-            return None
-
-        return await self.client.send_file(
-            entity=chat_id,
-            file=uploaded_inputs,
-            caption=captions[: len(uploaded_inputs)],
-        )
+        str_paths = [str(fp) for fp in valid_paths]
+        retry_count = 0
+        while retry_count < max_retries:
+            try:
+                # Telethon send_file with a list of file paths natively builds
+                # a multi-media album, calls UploadMediaRequest, and preserves streaming
+                msgs = await self.client.send_file(
+                    entity=chat_id,
+                    file=str_paths,
+                    caption=caps,
+                    supports_streaming=True,
+                    progress_callback=progress_callback,
+                )
+                return msgs if isinstance(msgs, list) else [msgs]
+            except FloodWaitError as fw:
+                logger.warning(f"FloodWait during album upload: {fw.seconds}s")
+                await asyncio.sleep(fw.seconds + 1)
+                retry_count += 1
+            except Exception as e:
+                logger.error(f"Album upload attempt {retry_count + 1} failed: {e}")
+                retry_count += 1
+                if retry_count >= max_retries:
+                    raise
+                await asyncio.sleep(2 * retry_count)
