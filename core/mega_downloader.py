@@ -3,13 +3,14 @@ import os
 import re
 import shutil
 import time
+import uuid
 from pathlib import Path
 from typing import Optional, Tuple
 
 from telethon import Button, events
 
-from config import ADMIN_IDS, DOWNLOAD_DIR
-from core.media import generate_video_thumbnail, get_video_metadata, is_video_file
+import config
+from core.media import generate_video_thumbnail, get_video_metadata, is_photo_file, is_video_file
 from core.queue_manager import queue_mgr
 from core.uploader import TelethonUploader
 from utils.helpers import format_bytes, format_duration
@@ -77,10 +78,17 @@ def detect_mega_engine() -> Tuple[Optional[str], Optional[list[str]]]:
     return None, None
 
 
-async def process_mega_link(event: events.NewMessage.Event, url: str):
+async def process_mega_link(
+    event: events.NewMessage.Event,
+    url: str,
+    filter_mode: str = "all",
+    has_explicit_inline_filter: bool = False,
+    pending_prompts: Optional[dict] = None,
+):
     """
     Handle downloading from Mega.nz (file or folder) and uploading to Telegram.
-    Includes live progress tracking, inline abort button, quota handling, and disk cleanup.
+    Includes Smart Folder Filter buttons, Smart Album grouping, live progress,
+    cancellation support, quota handling, and guaranteed disk cleanup.
     """
     user_id = event.sender_id
     status_msg = None
@@ -90,7 +98,7 @@ async def process_mega_link(event: events.NewMessage.Event, url: str):
     stop_monitor = asyncio.Event()
 
     # Rate limiting & concurrency slot check (Admins bypass)
-    if user_id not in ADMIN_IDS:
+    if user_id not in config.ADMIN_IDS:
         can_proceed, reason = await queue_mgr.can_process_user(user_id)
         if not can_proceed:
             await event.reply(reason)
@@ -126,7 +134,7 @@ async def process_mega_link(event: events.NewMessage.Event, url: str):
 
         # Prepare isolated download directory
         safe_id = f"{int(time.time())}_{user_id}"
-        local_dir = DOWNLOAD_DIR / f"mega_{safe_id}"
+        local_dir = config.DOWNLOAD_DIR / f"mega_{safe_id}"
         local_dir.mkdir(parents=True, exist_ok=True)
 
         if not status_msg:
@@ -226,25 +234,205 @@ async def process_mega_link(event: events.NewMessage.Event, url: str):
             return
 
         # Locate downloaded files (supporting both single files and recursive folders)
-        files_to_upload = sorted([f for f in local_dir.rglob("*") if f.is_file() and not f.name.startswith(".")])
-        if not files_to_upload:
+        all_downloaded = sorted([f for f in local_dir.rglob("*") if f.is_file() and not f.name.startswith(".")])
+        if not all_downloaded:
             await status_msg.edit("❌ **No files found in the downloaded Mega link.**", buttons=None)
             return
 
-        total_files = len(files_to_upload)
-        total_folder_size = sum(f.stat().st_size for f in files_to_upload)
-        logger.info(f"Mega download complete for user {user_id}: {total_files} file(s), {format_bytes(total_folder_size)}")
+        raw_count = len(all_downloaded)
 
-        # Initialize fast uploader
+        # Categorize files
+        video_files = [f for f in all_downloaded if is_video_file(f)]
+        photo_files = [f for f in all_downloaded if is_photo_file(f)]
+        other_files = [f for f in all_downloaded if f not in video_files and f not in photo_files]
+        other_count = len(other_files)
+
+        files_to_upload = all_downloaded
+
+        # ---------------- SMART ACTION BUTTONS (MULTI-FILE FOLDERS) ---------------- #
+        if raw_count > 1 and not has_explicit_inline_filter and pending_prompts is not None:
+            session_id = uuid.uuid4().hex[:8]
+            loop = asyncio.get_running_loop()
+            future = loop.create_future()
+            pending_prompts[session_id] = (user_id, future)
+
+            buttons = []
+            row1 = []
+            if len(video_files) > 0:
+                row1.append(Button.inline(f"🎬 Only Videos ({len(video_files)})", data=f"act:video:{session_id}"))
+            if len(photo_files) > 0:
+                row1.append(Button.inline(f"🖼️ Only Photos ({len(photo_files)})", data=f"act:photo:{session_id}"))
+            if row1:
+                buttons.append(row1)
+
+            row2 = []
+            if other_count > 0:
+                row2.append(Button.inline(f"📄 Others ({other_count})", data=f"act:other:{session_id}"))
+            row2.append(Button.inline(f"📁 Download All ({raw_count})", data=f"act:all:{session_id}"))
+            buttons.append(row2)
+
+            buttons.append([Button.inline("❌ Cancel", data=f"act:cancel:{session_id}")])
+
+            msg_text = (
+                f"📂 **Folder Discovered (Mega.nz)**\n\n"
+                f"📊 **Total Files**: `{raw_count}`\n"
+                f"• 🎬 **Videos**: `{len(video_files)}`\n"
+                f"• 🖼️ **Photos**: `{len(photo_files)}`\n"
+            )
+            if other_count > 0:
+                msg_text += f"• 📄 **Other Files**: `{other_count}`\n"
+            msg_text += "\n👇 **Aapko kya download karna hai? Choose karo:**"
+
+            await status_msg.edit(msg_text, buttons=buttons)
+
+            try:
+                chosen_action = await asyncio.wait_for(future, timeout=300)
+            except asyncio.TimeoutError:
+                await status_msg.edit("⏱️ **Selection timed out (5 min).** Please resend link if needed.", buttons=None)
+                return
+            finally:
+                pending_prompts.pop(session_id, None)
+
+            if chosen_action == "cancel":
+                await status_msg.edit("❌ **Download cancelled by user.**", buttons=None)
+                return
+
+            if chosen_action == "video":
+                files_to_upload = video_files
+                filter_mode = "video"
+            elif chosen_action == "photo":
+                files_to_upload = photo_files
+                filter_mode = "photo"
+            elif chosen_action == "other":
+                files_to_upload = other_files
+                filter_mode = "other"
+            else:
+                files_to_upload = all_downloaded
+                filter_mode = "all"
+        else:
+            # Inline filter specified or default filter active
+            if filter_mode == "video":
+                files_to_upload = video_files
+            elif filter_mode == "photo":
+                files_to_upload = photo_files
+            elif filter_mode == "other":
+                files_to_upload = other_files
+            else:
+                files_to_upload = all_downloaded
+
+        # Check if filter resulted in 0 files
+        total_files = len(files_to_upload)
+        if total_files == 0:
+            type_label = {
+                "video": "Videos",
+                "photo": "Photos",
+                "other": "Other Files",
+            }.get(filter_mode, "Files")
+            await status_msg.edit(
+                f"⚠️ **No {type_label} Found!**\n\n"
+                f"This share contains **{raw_count} files**, but **0** matched your filter (`{filter_mode.upper()}`).\n\n"
+                f"💡 _Tip: Use `/filter all` or add `all` to download all files without filtering._",
+                buttons=None,
+            )
+            return
+
+        # Delete unused filtered-out files from local disk immediately to free space
+        for f in all_downloaded:
+            if f not in files_to_upload:
+                try:
+                    f.unlink()
+                except Exception:
+                    pass
+
+        total_size = sum(f.stat().st_size for f in files_to_upload)
+        is_multi_file = total_files > 1
+
+        if is_multi_file:
+            filter_badge = f"\n🎯 **Filter Active**: `{filter_mode.upper()} ONLY` ({total_files} of {raw_count} files selected)" if filter_mode != "all" else ""
+            await status_msg.edit(
+                f"📂 **Processing {total_files} files** in this Mega share.{filter_badge}\n"
+                "⏳ *Beginning smart batch upload...*",
+                buttons=make_stop_btn(user_id),
+            )
+            await asyncio.sleep(1.0)
+
+        # ---------------- SMART ALBUM MAKER & UPLOAD PIPELINE ---------------- #
         uploader = TelethonUploader(event.client)
+        album_paths = []
+        album_captions = []
+        album_size = 0
+        ALBUM_MAX_SIZE = 100 * 1024 * 1024  # 100 MB max limit per album
+        ALBUM_MAX_ITEMS = 10
+
+        async def flush_album():
+            nonlocal album_paths, album_captions, album_size
+            if not album_paths:
+                return
+            try:
+                await status_msg.edit(
+                    f"📤 Uploading Album ({len(album_paths)} items) to Telegram...",
+                    buttons=make_stop_btn(user_id),
+                )
+                if config.PRIVATE_CHAT_ID:
+                    msgs = await event.client.send_file(config.PRIVATE_CHAT_ID, album_paths, caption=album_captions)
+                    await event.client.forward_messages(event.chat_id, msgs)
+                else:
+                    await event.client.send_file(event.chat_id, album_paths, caption=album_captions)
+            except Exception as e:
+                logger.error(f"Album upload failed: {e}")
+
+            for p in album_paths:
+                try:
+                    if p.exists():
+                        p.unlink()
+                except Exception:
+                    pass
+            album_paths.clear()
+            album_captions.clear()
+            album_size = 0
 
         for idx, file_path in enumerate(files_to_upload, start=1):
             file_size = file_path.stat().st_size
-            file_prefix = f"[{idx}/{total_files}] " if total_files > 1 else ""
+            file_prefix = f"[{idx}/{total_files}] " if is_multi_file else ""
 
-            # Extract video metadata and generate thumbnail
+            # Check Over-size (2GB standard Telegram limit)
+            max_size_bytes = config.MAX_FILE_SIZE_MB * 1024 * 1024
+            if file_size > max_size_bytes:
+                await flush_album()
+                await event.reply(
+                    f"📄 **{file_path.name}**\n\n"
+                    f"💾 **Size**: {format_bytes(file_size)}\n"
+                    f"🛑 **Direct Bot Upload Limit**: {config.MAX_FILE_SIZE_MB} MB\n\n"
+                    f"This file exceeds the Telegram bot upload limit."
+                )
+                try:
+                    file_path.unlink()
+                except Exception:
+                    pass
+                continue
+
+            # ALBUM LOGIC for photos and small videos/files (< 100 MB) when multiple files exist
+            can_be_album_item = (
+                is_multi_file
+                and file_size < ALBUM_MAX_SIZE
+                and (is_photo_file(file_path) or is_video_file(file_path) or total_files >= 3)
+            )
+
+            if can_be_album_item:
+                if album_size + file_size > ALBUM_MAX_SIZE or len(album_paths) >= ALBUM_MAX_ITEMS:
+                    await flush_album()
+
+                album_paths.append(file_path)
+                album_captions.append(f"📁 **{file_path.name}**\n☁️ `Mega.nz`")
+                album_size += file_size
+                continue
+
+            # Large file (> 100 MB) OR standalone file -> Standalone Fast MTProto Upload
+            await flush_album()
+
+            # Video thumbnail generation
             thumb_path = None
-            if is_video_file(file_path.name):
+            if is_video_file(file_path):
                 try:
                     meta = get_video_metadata(file_path)
                     if meta and meta.get("duration", 0) > 0:
@@ -293,7 +481,15 @@ async def process_mega_link(event: events.NewMessage.Event, url: str):
                 except Exception:
                     pass
 
-        # Cleanup status message
+            try:
+                file_path.unlink()
+            except Exception:
+                pass
+
+        # Flush any remaining album items
+        await flush_album()
+
+        # Delete status message
         if status_msg:
             try:
                 await status_msg.delete()
@@ -302,7 +498,7 @@ async def process_mega_link(event: events.NewMessage.Event, url: str):
 
         await event.reply(
             f"✅ **Mega Transfer Complete!**\n"
-            f"Successfully uploaded {total_files} file(s) ({format_bytes(total_folder_size)})."
+            f"Successfully processed {total_files} file(s) ({format_bytes(total_size)})."
         )
 
     except asyncio.CancelledError:

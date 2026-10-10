@@ -729,13 +729,6 @@ async def handle_incoming_message(event: events.NewMessage.Event):
     # Process first found URL
     target_url = urls[0]
 
-    # Mega Link Dispatcher (handles files, folders, and legacy mega links)
-    if is_mega_url(target_url):
-        logger.info(f"Routing Mega link from user {user_id}: {target_url[:50]}...")
-        task = asyncio.create_task(process_mega_link(event, target_url))
-        active_tasks[user_id] = task
-        return
-
     # Check for inline filter cues in the message text
     raw_lower = event.raw_text.lower()
     words = raw_lower.split()
@@ -752,6 +745,21 @@ async def handle_incoming_message(event: events.NewMessage.Event):
     # Use inline filter if specified; otherwise load user's persistent default
     has_explicit_inline_filter = inline_filter is not None
     active_filter = inline_filter if inline_filter else await db.get_user_filter(user_id)
+
+    # Mega Link Dispatcher (handles files, folders, and legacy mega links)
+    if is_mega_url(target_url):
+        logger.info(f"Routing Mega link from user {user_id} [Filter: {active_filter}]: {target_url[:50]}...")
+        task = asyncio.create_task(
+            process_mega_link(
+                event=event,
+                url=target_url,
+                filter_mode=active_filter,
+                has_explicit_inline_filter=has_explicit_inline_filter,
+                pending_prompts=pending_prompts,
+            )
+        )
+        active_tasks[user_id] = task
+        return
 
     logger.info(f"Received download request from user {user_id} [Filter: {active_filter}]: {target_url[:50]}...")
     

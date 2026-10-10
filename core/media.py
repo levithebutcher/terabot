@@ -14,10 +14,19 @@ VIDEO_EXTENSIONS = {
     ".ts", ".3gp", ".asf", ".vob", ".mpg", ".mpeg"
 }
 
+IMAGE_EXTENSIONS = {
+    ".jpg", ".jpeg", ".png", ".webp", ".bmp", ".gif", ".tiff", ".heic"
+}
+
 
 def is_video_file(file_path: Path) -> bool:
     """Check if file is a video by extension."""
     return file_path.suffix.lower() in VIDEO_EXTENSIONS
+
+
+def is_photo_file(file_path: Path) -> bool:
+    """Check if file is an image/photo by extension."""
+    return file_path.suffix.lower() in IMAGE_EXTENSIONS
 
 
 def get_video_metadata(file_path: Path) -> dict:
