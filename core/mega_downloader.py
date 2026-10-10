@@ -72,6 +72,43 @@ def render_mega_progress(action: str, name: str, current: int, total: int, speed
         )
 
 
+def sanitize_filename(name: str) -> str:
+    """Remove unsafe filesystem characters from filename."""
+    clean = re.sub(r'[\\/*?:"<>|]', "_", name).strip()
+    return clean or "unnamed_file"
+
+
+def get_aes_ctr_decryptor(file_key: bytes, iv_int: int):
+    """
+    Return a fast decrypt function for AES-128-CTR.
+    Prefers cryptography (OpenSSL AES-NI C bindings, ~1 GB/s),
+    then pycryptodome (C extension, ~500 MB/s),
+    falling back to pyaes (pure Python).
+    """
+    try:
+        from cryptography.hazmat.primitives.ciphers import Cipher, algorithms, modes
+        from cryptography.hazmat.backends import default_backend
+        iv_bytes = struct.pack(">Q", iv_int) + (b"\x00" * 8)
+        cipher = Cipher(algorithms.AES(file_key), modes.CTR(iv_bytes), backend=default_backend())
+        decryptor = cipher.decryptor()
+        return decryptor.update
+    except ImportError:
+        pass
+
+    try:
+        from Crypto.Cipher import AES
+        from Crypto.Util import Counter
+        ctr = Counter.new(128, initial_value=(iv_int << 64))
+        cipher = AES.new(file_key, AES.MODE_CTR, counter=ctr)
+        return cipher.decrypt
+    except ImportError:
+        pass
+
+    import pyaes
+    aes_ctr = pyaes.AESModeOfOperationCTR(file_key, counter=pyaes.Counter(iv_int << 64))
+    return aes_ctr.decrypt
+
+
 def detect_mega_engine() -> Tuple[Optional[str], Optional[list[str]]]:
     """
     Detect available Mega CLI download engine on the host system.
@@ -120,8 +157,8 @@ def _str_to_a32(b: bytes) -> tuple:
 async def inspect_mega_folder(url: str) -> Optional[dict]:
     """
     Inspect a public Mega folder via Mega API in pure Python in seconds.
-    Returns folder file count, categorized into videos, photos, others, and total size
-    BEFORE downloading a single byte to disk.
+    Returns folder file count, categorized into videos, photos, others, and total size,
+    along with decrypted node keys and handles for selective downloading.
     """
     m = re.search(r"mega\.(?:nz|co\.nz|io)/(?:folder/|#F!)([a-zA-Z0-9_\-]+)[#!]([a-zA-Z0-9_\-]+)", url)
     if not m:
@@ -132,7 +169,7 @@ async def inspect_mega_folder(url: str) -> Optional[dict]:
     payload = json.dumps([{"a": "f", "c": 1, "ca": 1, "r": 1}])
 
     try:
-        timeout = aiohttp.ClientTimeout(total=20)
+        timeout = aiohttp.ClientTimeout(total=25)
         async with aiohttp.ClientSession(timeout=timeout) as session:
             async with session.post(api_url, data=payload, headers={"Content-Type": "application/json"}) as resp:
                 if resp.status != 200:
@@ -144,7 +181,20 @@ async def inspect_mega_folder(url: str) -> Optional[dict]:
 
         nodes = raw[0]["f"]
         folder_key_bytes = _b64_dec(folder_key)
-        aes_ecb = pyaes.AESModeOfOperationECB(folder_key_bytes)
+
+        # ECB decryptor for folder master keys
+        try:
+            from cryptography.hazmat.primitives.ciphers import Cipher, algorithms, modes
+            from cryptography.hazmat.backends import default_backend
+            cipher_ecb = Cipher(algorithms.AES(folder_key_bytes), modes.ECB(), backend=default_backend())
+            decrypt_ecb = cipher_ecb.decryptor().update
+        except ImportError:
+            try:
+                from Crypto.Cipher import AES
+                decrypt_ecb = AES.new(folder_key_bytes, AES.MODE_ECB).decrypt
+            except ImportError:
+                import pyaes
+                decrypt_ecb = pyaes.AESModeOfOperationECB(folder_key_bytes).decrypt
 
         videos = []
         photos = []
@@ -159,15 +209,29 @@ async def inspect_mega_folder(url: str) -> Optional[dict]:
 
             try:
                 enc_k = _b64_dec(k_parts[1])
-                dec_k = aes_ecb.decrypt(enc_k[:16]) + aes_ecb.decrypt(enc_k[16:32])
+                dec_k = decrypt_ecb(enc_k[:16]) + decrypt_ecb(enc_k[16:32])
                 k_a32 = _str_to_a32(dec_k)
                 file_key = _a32_to_str(
                     (k_a32[0] ^ k_a32[4], k_a32[1] ^ k_a32[5], k_a32[2] ^ k_a32[6], k_a32[3] ^ k_a32[7])
                 )
+                iv_int = struct.unpack(">Q", _a32_to_str((k_a32[4], k_a32[5])))[0]
 
                 enc_attr = _b64_dec(node["a"])
-                aes_cbc = pyaes.AESModeOfOperationCBC(file_key, iv=b"\0" * 16)
-                dec_attr = b"".join(aes_cbc.decrypt(enc_attr[i : i + 16]) for i in range(0, len(enc_attr), 16))
+
+                # CBC decryptor for file metadata
+                try:
+                    from cryptography.hazmat.primitives.ciphers import Cipher, algorithms, modes
+                    from cryptography.hazmat.backends import default_backend
+                    cipher_cbc = Cipher(algorithms.AES(file_key), modes.CBC(b"\0" * 16), backend=default_backend())
+                    dec_attr = cipher_cbc.decryptor().update(enc_attr)
+                except ImportError:
+                    try:
+                        from Crypto.Cipher import AES
+                        dec_attr = AES.new(file_key, AES.MODE_CBC, iv=b"\0" * 16).decrypt(enc_attr)
+                    except ImportError:
+                        import pyaes
+                        aes_cbc = pyaes.AESModeOfOperationCBC(file_key, iv=b"\0" * 16)
+                        dec_attr = b"".join(aes_cbc.decrypt(enc_attr[i : i + 16]) for i in range(0, len(enc_attr), 16))
 
                 m_json = re.search(b"MEGA({.+?})", dec_attr)
                 if not m_json:
@@ -177,7 +241,13 @@ async def inspect_mega_folder(url: str) -> Optional[dict]:
                 size = node.get("s", 0)
                 ext = ("." + name.split(".")[-1].lower()) if "." in name else ""
 
-                item = {"name": name, "size": size}
+                item = {
+                    "name": name,
+                    "size": size,
+                    "h": node["h"],
+                    "file_key": file_key,
+                    "iv_int": iv_int,
+                }
                 if ext in VIDEO_EXTENSIONS:
                     videos.append(item)
                 elif ext in IMAGE_EXTENSIONS:
@@ -191,6 +261,8 @@ async def inspect_mega_folder(url: str) -> Optional[dict]:
         total_size = sum(f["size"] for f in videos + photos + others)
 
         return {
+            "folder_id": folder_id,
+            "folder_key": folder_key,
             "total_files": total_files,
             "videos": videos,
             "photos": photos,
@@ -200,6 +272,81 @@ async def inspect_mega_folder(url: str) -> Optional[dict]:
     except Exception as e:
         logger.warning(f"Error inspecting Mega folder via API: {e}")
         return None
+
+
+async def download_mega_node_stream(
+    session: aiohttp.ClientSession,
+    folder_id: str,
+    node: dict,
+    dest_path: Path,
+    progress_callback=None,
+    stop_event: Optional[asyncio.Event] = None,
+) -> bool:
+    """
+    Download a single file node from a Mega folder directly via CDN streaming & AES-CTR decryption.
+    Downloads ONLY this single file without touching any other files in the folder.
+    """
+    target_size = node.get("size", 0)
+    if target_size == 0:
+        dest_path.touch(exist_ok=True)
+        return True
+
+    api_url = f"https://g.api.mega.co.nz/cs?id=0&n={folder_id}"
+    payload = json.dumps([{"a": "g", "g": 1, "n": node["h"]}])
+
+    try:
+        async with session.post(api_url, data=payload, headers={"Content-Type": "application/json"}) as resp:
+            if resp.status != 200:
+                logger.error(f"Mega API error {resp.status} for node {node['h']}")
+                return False
+            data = await resp.json()
+
+        if not data or not isinstance(data, list) or "g" not in data[0]:
+            logger.error(f"Failed to obtain Mega CDN link for node {node['h']}: {data}")
+            return False
+
+        g_url = data[0]["g"]
+        file_key = node["file_key"]
+        iv_int = node["iv_int"]
+        decrypt_func = get_aes_ctr_decryptor(file_key, iv_int)
+
+        timeout = aiohttp.ClientTimeout(total=None, connect=60, sock_read=60)
+        async with session.get(g_url, timeout=timeout) as stream_resp:
+            if stream_resp.status not in (200, 206):
+                logger.error(f"Mega CDN status {stream_resp.status} for {node['name']}")
+                return False
+
+            downloaded_bytes = 0
+            last_callback_time = 0.0
+            start_time = time.monotonic()
+
+            with open(dest_path, "wb") as f:
+                async for chunk in stream_resp.content.iter_chunked(256 * 1024):
+                    if stop_event and stop_event.is_set():
+                        return False
+
+                    plain_chunk = decrypt_func(chunk)
+                    if downloaded_bytes + len(plain_chunk) > target_size:
+                        plain_chunk = plain_chunk[: target_size - downloaded_bytes]
+
+                    f.write(plain_chunk)
+                    downloaded_bytes += len(plain_chunk)
+
+                    now = time.monotonic()
+                    if progress_callback and (now - last_callback_time >= 3.5 or downloaded_bytes >= target_size):
+                        last_callback_time = now
+                        speed = downloaded_bytes / (now - start_time) if (now - start_time) > 0 else 0.0
+                        await progress_callback(downloaded_bytes, target_size, speed)
+
+        return True
+    except Exception as e:
+        logger.error(f"Error streaming Mega node {node.get('name')}: {e}")
+        if dest_path.exists():
+            try:
+                dest_path.unlink()
+            except Exception:
+                pass
+        return False
 
 
 # ---------------- MAIN MEGA PROCESSOR ---------------- #
@@ -214,7 +361,8 @@ async def process_mega_link(
     """
     Handle downloading from Mega.nz (file or folder) and uploading to Telegram.
     Inspects folders in advance, prompts Smart Action Buttons BEFORE downloading,
-    batches photos into Smart Albums, and streams updates with live speed & ETA.
+    downloads ONLY the chosen category (zero wasted bytes), batches photos into Smart Albums,
+    and streams updates with live speed & ETA.
     """
     user_id = event.sender_id
     status_msg = None
@@ -241,27 +389,12 @@ async def process_mega_link(
             )
         await queue_mgr.enter_worker()
 
-        # Engine detection
-        engine_name, base_cmd = detect_mega_engine()
-        if not engine_name or not base_cmd:
-            err_msg = (
-                "❌ **Mega Downloader Engine Not Installed!**\n\n"
-                "Host environment does not have `mega-cmd` or `megatools` installed.\n"
-                "• **Debian/Ubuntu/Colab setup**:\n"
-                "`sudo apt update && sudo apt install -y megatools`\n"
-                "or install official MEGAcmd:\n"
-                "`wget https://mega.nz/linux/repo/xUbuntu_22.04/amd64/megacmd-xUbuntu_22.04_amd64.deb && sudo apt install ./megacmd-xUbuntu_22.04_amd64.deb`"
-            )
-            if status_msg:
-                await status_msg.edit(err_msg, buttons=None)
-            else:
-                await event.reply(err_msg)
-            return
-
         if not status_msg:
             status_msg = await event.reply("🔍 **Resolving Mega link...**", buttons=make_stop_btn(user_id))
         else:
             await status_msg.edit("🔍 **Resolving Mega link...**", buttons=make_stop_btn(user_id))
+
+        folder_info = None
 
         # ---------------- PRE-DOWNLOAD FOLDER INSPECTION & SMART BUTTONS ---------------- #
         if is_mega_folder_url(url):
@@ -330,9 +463,6 @@ async def process_mega_link(
                         return
 
                     filter_mode = chosen_action
-                else:
-                    # User passed inline filter like 'mega.nz/... video'
-                    pass
 
                 # Check if chosen filter has 0 files
                 if filter_mode == "video" and num_videos == 0:
@@ -349,11 +479,248 @@ async def process_mega_link(
                         buttons=None,
                     )
                     return
+                elif filter_mode == "other" and num_others == 0:
+                    await status_msg.edit(
+                        f"⚠️ **No Other Files Found!**\nThis folder contains {raw_count} files, but 0 other files.\n\n"
+                        "💡 _Use 'all' to download everything without filtering._",
+                        buttons=None,
+                    )
+                    return
 
         # Prepare isolated download directory
         safe_id = f"{int(time.time())}_{user_id}"
         local_dir = config.DOWNLOAD_DIR / f"mega_{safe_id}"
         local_dir.mkdir(parents=True, exist_ok=True)
+
+        # ---------------- SELECTIVE STREAM DOWNLOADER FOR MEGA FOLDERS ---------------- #
+        if is_mega_folder_url(url) and folder_info and folder_info.get("folder_id"):
+            if filter_mode == "video":
+                selected_nodes = folder_info["videos"]
+            elif filter_mode == "photo":
+                selected_nodes = folder_info["photos"]
+            elif filter_mode == "other":
+                selected_nodes = folder_info["others"]
+            else:
+                selected_nodes = folder_info["videos"] + folder_info["photos"] + folder_info["others"]
+
+            total_selected = len(selected_nodes)
+            if total_selected == 0:
+                type_label = {"video": "Videos", "photo": "Photos", "other": "Other Files"}.get(filter_mode, "Files")
+                await status_msg.edit(
+                    f"⚠️ **No {type_label} Found!**\nNo files matched your filter (`{filter_mode.upper()}`).",
+                    buttons=None,
+                )
+                return
+
+            total_selected_size = sum(n["size"] for n in selected_nodes)
+            is_multi_file = total_selected > 1
+
+            filter_badge_text = f"\n🎯 **Filter Active**: `{filter_mode.upper()} ONLY` ({total_selected} files selected)" if filter_mode != "all" else ""
+            await status_msg.edit(
+                f"📂 **Processing {total_selected} files** in this Mega folder.{filter_badge_text}\n"
+                f"📦 **Selected Size**: `{format_bytes(total_selected_size)}`\n"
+                "⏳ *Beginning selective stream download & upload...*",
+                buttons=make_stop_btn(user_id),
+            )
+            await asyncio.sleep(1.0)
+
+            uploader = TelethonUploader(event.client)
+            album_paths = []
+            album_captions = []
+            album_size = 0
+            ALBUM_MAX_SIZE = 100 * 1024 * 1024  # 100 MB max limit per album
+            ALBUM_MAX_ITEMS = 10
+
+            async def flush_album():
+                nonlocal album_paths, album_captions, album_size
+                if not album_paths:
+                    return
+                try:
+                    await status_msg.edit(
+                        f"📤 Uploading Album ({len(album_paths)} items) to Telegram...",
+                        buttons=make_stop_btn(user_id),
+                    )
+                    if config.PRIVATE_CHAT_ID:
+                        msgs = await event.client.send_file(config.PRIVATE_CHAT_ID, album_paths, caption=album_captions)
+                        await event.client.forward_messages(event.chat_id, msgs)
+                    else:
+                        await event.client.send_file(event.chat_id, album_paths, caption=album_captions)
+                except Exception as e:
+                    logger.error(f"Album upload failed: {e}")
+
+                for p in album_paths:
+                    try:
+                        if p.exists():
+                            p.unlink()
+                    except Exception:
+                        pass
+                album_paths.clear()
+                album_captions.clear()
+                album_size = 0
+
+            timeout = aiohttp.ClientTimeout(total=None, connect=60, sock_read=60)
+            async with aiohttp.ClientSession(timeout=timeout) as dl_session:
+                for idx, node in enumerate(selected_nodes, start=1):
+                    if stop_monitor.is_set():
+                        break
+
+                    file_size = node["size"]
+                    file_name = sanitize_filename(node["name"])
+                    file_prefix = f"[{idx}/{total_selected}] " if is_multi_file else ""
+
+                    # Check 2000 MB Telegram Bot upload limit
+                    max_size_bytes = config.MAX_FILE_SIZE_MB * 1024 * 1024
+                    if file_size > max_size_bytes:
+                        await flush_album()
+                        await event.reply(
+                            f"📄 **{file_name}**\n\n"
+                            f"💾 **Size**: {format_bytes(file_size)}\n"
+                            f"🛑 **Direct Bot Upload Limit**: {config.MAX_FILE_SIZE_MB} MB\n\n"
+                            f"⚠️ This file exceeds Telegram's 2000 MB bot limit and was skipped."
+                        )
+                        continue
+
+                    # Unique destination path to prevent collision
+                    dest_path = local_dir / file_name
+                    if dest_path.exists():
+                        dest_path = local_dir / f"{dest_path.stem}_{node['h'][:4]}{dest_path.suffix}"
+
+                    # Throttled download progress callback
+                    last_dl_edit = 0.0
+                    async def dl_progress(current: int, total: int, speed: float):
+                        nonlocal last_dl_edit
+                        now = time.monotonic()
+                        if now - last_dl_edit >= 3.5 or current == total:
+                            last_dl_edit = now
+                            txt = render_mega_progress(
+                                action=f"📥 {file_prefix}Downloading from Mega",
+                                name=file_name,
+                                current=current,
+                                total=total,
+                                speed=speed,
+                            )
+                            try:
+                                await status_msg.edit(txt, buttons=make_stop_btn(user_id))
+                            except Exception:
+                                pass
+
+                    success = await download_mega_node_stream(
+                        session=dl_session,
+                        folder_id=folder_info["folder_id"],
+                        node=node,
+                        dest_path=dest_path,
+                        progress_callback=dl_progress,
+                        stop_event=stop_monitor,
+                    )
+
+                    if not success or not dest_path.exists():
+                        logger.warning(f"Skipping failed node download: {file_name}")
+                        continue
+
+                    actual_size = dest_path.stat().st_size
+
+                    # Album grouping for photos and small files (< 100 MB)
+                    can_be_album_item = (
+                        is_multi_file
+                        and actual_size < ALBUM_MAX_SIZE
+                        and (is_photo_file(dest_path) or is_video_file(dest_path) or total_selected >= 3)
+                    )
+
+                    if can_be_album_item:
+                        if album_size + actual_size > ALBUM_MAX_SIZE or len(album_paths) >= ALBUM_MAX_ITEMS:
+                            await flush_album()
+                        album_paths.append(dest_path)
+                        album_captions.append(f"📁 **{dest_path.name}**\n☁️ `Mega.nz`")
+                        album_size += actual_size
+                        continue
+
+                    # Standalone Upload for large file (> 100 MB)
+                    await flush_album()
+
+                    thumb_path = None
+                    if is_video_file(dest_path):
+                        try:
+                            meta = get_video_metadata(dest_path)
+                            if meta and meta.get("duration", 0) > 0:
+                                thumb_path = await generate_video_thumbnail(dest_path, meta["duration"])
+                        except Exception as thumb_err:
+                            logger.warning(f"Failed thumbnail for {dest_path.name}: {thumb_err}")
+
+                    last_upload_edit = 0.0
+                    async def upload_progress(current: int, total: int, speed: float):
+                        nonlocal last_upload_edit
+                        now = time.monotonic()
+                        if now - last_upload_edit >= 3.5 or current == total:
+                            last_upload_edit = now
+                            txt = render_mega_progress(
+                                action=f"📤 {file_prefix}Uploading to Telegram",
+                                name=dest_path.name,
+                                current=current,
+                                total=total,
+                                speed=speed,
+                            )
+                            try:
+                                await status_msg.edit(txt, buttons=make_stop_btn(user_id))
+                            except Exception:
+                                pass
+
+                    caption = (
+                        f"📁 **{dest_path.name}**\n"
+                        f"📦 **Size**: `{format_bytes(actual_size)}`\n"
+                        f"☁️ **Source**: `Mega.nz`"
+                    )
+
+                    await uploader.upload_media(
+                        file_path=dest_path,
+                        reply_to_msg_id=event.id,
+                        caption=caption,
+                        thumb_path=thumb_path,
+                        progress_callback=upload_progress,
+                        workers=12,
+                    )
+
+                    if thumb_path and thumb_path.exists():
+                        try:
+                            thumb_path.unlink()
+                        except Exception:
+                            pass
+                    try:
+                        dest_path.unlink()
+                    except Exception:
+                        pass
+
+            # Flush any remaining album items
+            await flush_album()
+
+            if status_msg:
+                try:
+                    await status_msg.delete()
+                except Exception:
+                    pass
+
+            await event.reply(
+                f"✅ **Mega Transfer Complete!**\n"
+                f"🎯 **Filter**: `{filter_mode.upper()}`\n"
+                f"Successfully processed {total_selected} file(s) ({format_bytes(total_selected_size)})."
+            )
+            return
+
+        # ---------------- FALLBACK ENGINE FOR SINGLE FILES / CLI ---------------- #
+        engine_name, base_cmd = detect_mega_engine()
+        if not engine_name or not base_cmd:
+            err_msg = (
+                "❌ **Mega Downloader Engine Not Installed!**\n\n"
+                "Host environment does not have `mega-cmd` or `megatools` installed.\n"
+                "• **Debian/Ubuntu/Colab setup**:\n"
+                "`sudo apt update && sudo apt install -y megatools`\n"
+                "or install official MEGAcmd:\n"
+                "`wget https://mega.nz/linux/repo/xUbuntu_22.04/amd64/megacmd-xUbuntu_22.04_amd64.deb && sudo apt install ./megacmd-xUbuntu_22.04_amd64.deb`"
+            )
+            if status_msg:
+                await status_msg.edit(err_msg, buttons=None)
+            else:
+                await event.reply(err_msg)
+            return
 
         # Build download command with normalized URL for engine
         engine_url = normalize_mega_url_for_engine(url, engine_name)
@@ -467,7 +834,7 @@ async def process_mega_link(
         else:
             files_to_upload = all_downloaded
 
-        # Delete unused filtered-out files immediately from disk to save storage
+        # Delete unused filtered-out files immediately from disk
         for f in all_downloaded:
             if f not in files_to_upload:
                 try:
@@ -496,15 +863,15 @@ async def process_mega_link(
             )
             await asyncio.sleep(1.0)
 
-        # ---------------- SMART ALBUM MAKER & UPLOAD PIPELINE ---------------- #
+        # Smart Album Maker & Upload pipeline for CLI fallback
         uploader = TelethonUploader(event.client)
         album_paths = []
         album_captions = []
         album_size = 0
-        ALBUM_MAX_SIZE = 100 * 1024 * 1024  # 100 MB max limit per album
+        ALBUM_MAX_SIZE = 100 * 1024 * 1024
         ALBUM_MAX_ITEMS = 10
 
-        async def flush_album():
+        async def flush_album_cli():
             nonlocal album_paths, album_captions, album_size
             if not album_paths:
                 return
@@ -535,15 +902,15 @@ async def process_mega_link(
             file_size = file_path.stat().st_size
             file_prefix = f"[{idx}/{total_files}] " if is_multi_file else ""
 
-            # Check Over-size (2GB standard Telegram limit)
+            # Check Over-size (2GB limit)
             max_size_bytes = config.MAX_FILE_SIZE_MB * 1024 * 1024
             if file_size > max_size_bytes:
-                await flush_album()
+                await flush_album_cli()
                 await event.reply(
                     f"📄 **{file_path.name}**\n\n"
                     f"💾 **Size**: {format_bytes(file_size)}\n"
                     f"🛑 **Direct Bot Upload Limit**: {config.MAX_FILE_SIZE_MB} MB\n\n"
-                    f"This file exceeds the Telegram bot upload limit."
+                    f"⚠️ This file exceeds Telegram's 2000 MB limit and was skipped."
                 )
                 try:
                     file_path.unlink()
@@ -551,7 +918,6 @@ async def process_mega_link(
                     pass
                 continue
 
-            # ALBUM LOGIC for photos and small videos/files (< 100 MB) when multiple files exist
             can_be_album_item = (
                 is_multi_file
                 and file_size < ALBUM_MAX_SIZE
@@ -560,17 +926,15 @@ async def process_mega_link(
 
             if can_be_album_item:
                 if album_size + file_size > ALBUM_MAX_SIZE or len(album_paths) >= ALBUM_MAX_ITEMS:
-                    await flush_album()
+                    await flush_album_cli()
 
                 album_paths.append(file_path)
                 album_captions.append(f"📁 **{file_path.name}**\n☁️ `Mega.nz`")
                 album_size += file_size
                 continue
 
-            # Large file (> 100 MB) OR standalone file -> Standalone Fast MTProto Upload
-            await flush_album()
+            await flush_album_cli()
 
-            # Video thumbnail generation
             thumb_path = None
             if is_video_file(file_path):
                 try:
@@ -580,7 +944,6 @@ async def process_mega_link(
                 except Exception as thumb_err:
                     logger.warning(f"Failed to generate thumbnail for {file_path.name}: {thumb_err}")
 
-            # Throttled upload progress callback (FloodWait prevention)
             last_upload_edit = 0.0
 
             async def upload_progress(current: int, total: int, speed: float):
@@ -626,10 +989,8 @@ async def process_mega_link(
             except Exception:
                 pass
 
-        # Flush any remaining album items
-        await flush_album()
+        await flush_album_cli()
 
-        # Delete status message
         if status_msg:
             try:
                 await status_msg.delete()
@@ -638,6 +999,7 @@ async def process_mega_link(
 
         await event.reply(
             f"✅ **Mega Transfer Complete!**\n"
+            f"🎯 **Filter**: `{filter_mode.upper()}`\n"
             f"Successfully processed {total_files} file(s) ({format_bytes(total_size)})."
         )
 
