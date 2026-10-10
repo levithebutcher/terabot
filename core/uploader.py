@@ -19,7 +19,7 @@ async def fast_upload_file(
     client: TelegramClient,
     file_path: Path,
     part_size_kb: int = 512,
-    workers: int = 8,
+    workers: int = 12,
     progress_callback: Optional[Callable[[int, int, float], None]] = None,
     max_retries: int = 3,
 ) -> types.TypeInputFile:
@@ -159,7 +159,7 @@ class TelethonUploader:
         thumb_path: Optional[Path] = None,
         progress_callback: Optional[Callable[[int, int, float], None]] = None,
         max_retries: int = 3,
-        workers: int = 8,
+        workers: int = 12,
     ):
         """
         Upload file using multi-connection fast parallel chunk transfer.

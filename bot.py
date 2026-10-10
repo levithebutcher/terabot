@@ -594,7 +594,7 @@ async def process_terabox_link(
                         pass
 
             # Download small file
-            downloader = TeraBoxDownloader(connections=4)
+            downloader = TeraBoxDownloader(connections=config.DOWNLOAD_STREAMS)
             try:
                 downloaded_file = await downloader.download_file(
                     dlink=file_obj.dlink, filename=file_obj.file_name,

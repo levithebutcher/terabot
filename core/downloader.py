@@ -22,8 +22,8 @@ class TeraBoxDownloader:
     streaming chunk writes, live speed tracking, and single-stream fallback.
     """
 
-    CHUNK_SIZE = 1024 * 1024  # 1 MB buffer
-    DEFAULT_PARALLEL_CONNECTIONS = 6
+    CHUNK_SIZE = 256 * 1024  # 256 KB buffer for smooth high-speed TCP streaming
+    DEFAULT_PARALLEL_CONNECTIONS = 10
 
     def __init__(self, cookie: Optional[str] = None, connections: int = DEFAULT_PARALLEL_CONNECTIONS):
         self.cookie = cookie if cookie is not None else TERABOX_COOKIE
@@ -32,18 +32,13 @@ class TeraBoxDownloader:
     def _get_headers(self) -> dict:
         headers = {
             "User-Agent": (
-                "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
-                "AppleWebKit/537.36 (KHTML, like Gecko) "
-                "Chrome/135.0.0.0 Safari/537.36 Edg/135.0.0.0"
+                "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+                "(KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36"
             ),
             "Accept": "*/*",
             "Accept-Encoding": "identity",
             "Connection": "keep-alive",
-            "Referer": "https://terabox.com/",
-            "DNT": "1",
-            "Sec-Fetch-Dest": "document",
-            "Sec-Fetch-Mode": "navigate",
-            "Sec-Fetch-Site": "cross-site",
+            "Referer": "https://www.terabox.app/",
         }
         if self.cookie:
             headers["Cookie"] = self.cookie
@@ -61,44 +56,75 @@ class TeraBoxDownloader:
         progress_callback: Optional[Callable[[int, int, float], None]],
         total_size: int,
         lock: asyncio.Lock,
+        max_part_retries: int = 5,
     ) -> int:
-        """Download an individual byte range and write directly to file at byte offset."""
-        headers = self._get_headers()
-        headers["Range"] = f"bytes={start_byte}-{end_byte}"
-        timeout = aiohttp.ClientTimeout(total=3600, connect=30, sock_read=90)
+        """Download an individual byte range with resilient auto-retry and offset resume."""
+        part_expected = (end_byte - start_byte) + 1
+        part_downloaded = 0
 
-        async with session.get(dlink, headers=headers, timeout=timeout) as resp:
-            if resp.status not in (200, 206):
-                raise DownloadError(f"Part {part_id} HTTP error: {resp.status}")
+        for attempt in range(max_part_retries):
+            current_start = start_byte + part_downloaded
+            if current_start > end_byte:
+                break
 
-            part_downloaded = 0
-            with open(output_file_path, "r+b") as f:
-                f.seek(start_byte)
-                async for chunk in resp.content.iter_chunked(self.CHUNK_SIZE):
-                    if not chunk:
-                        break
-                    f.write(chunk)
-                    chunk_len = len(chunk)
-                    part_downloaded += chunk_len
+            headers = self._get_headers()
+            headers["Range"] = f"bytes={current_start}-{end_byte}"
+            timeout = aiohttp.ClientTimeout(total=1800, connect=30, sock_read=60)
 
-                    # Update aggregate progress
-                    async with lock:
-                        progress_tracker["downloaded"] += chunk_len
-                        progress_tracker["recent_bytes"] += chunk_len
-                        now = time.monotonic()
-                        elapsed = now - progress_tracker["last_time"]
+            try:
+                async with session.get(dlink, headers=headers, timeout=timeout) as resp:
+                    if resp.status not in (200, 206):
+                        raise DownloadError(f"Part {part_id} HTTP error: {resp.status}")
 
-                        if elapsed >= 1.0 or progress_tracker["downloaded"] >= total_size:
-                            speed = progress_tracker["recent_bytes"] / elapsed if elapsed > 0 else 0.0
-                            progress_tracker["last_time"] = now
-                            progress_tracker["recent_bytes"] = 0
-                            if progress_callback:
-                                if asyncio.iscoroutinefunction(progress_callback):
-                                    await progress_callback(progress_tracker["downloaded"], total_size, speed)
-                                else:
-                                    progress_callback(progress_tracker["downloaded"], total_size, speed)
+                    # If server returned 200 for a partial slice, it ignores Range headers
+                    if resp.status == 200 and part_expected < total_size:
+                        raise DownloadError(f"Server returned status 200 (no Range support) on part {part_id}")
 
-            return part_downloaded
+                    with open(output_file_path, "r+b") as f:
+                        f.seek(current_start)
+                        async for chunk in resp.content.iter_chunked(self.CHUNK_SIZE):
+                            if not chunk:
+                                break
+                            
+                            # Never write past the allocated slice
+                            remaining = (end_byte - f.tell()) + 1
+                            if remaining <= 0:
+                                break
+                            chunk_to_write = chunk[:remaining]
+                            f.write(chunk_to_write)
+                            chunk_len = len(chunk_to_write)
+                            part_downloaded += chunk_len
+
+                            # Update aggregate progress
+                            async with lock:
+                                progress_tracker["downloaded"] += chunk_len
+                                progress_tracker["recent_bytes"] += chunk_len
+                                now = time.monotonic()
+                                elapsed = now - progress_tracker["last_time"]
+
+                                if elapsed >= 1.0 or progress_tracker["downloaded"] >= total_size:
+                                    speed = progress_tracker["recent_bytes"] / elapsed if elapsed > 0 else 0.0
+                                    progress_tracker["last_time"] = now
+                                    progress_tracker["recent_bytes"] = 0
+                                    if progress_callback:
+                                        if asyncio.iscoroutinefunction(progress_callback):
+                                            await progress_callback(progress_tracker["downloaded"], total_size, speed)
+                                        else:
+                                            progress_callback(progress_tracker["downloaded"], total_size, speed)
+
+                if part_downloaded >= part_expected:
+                    return part_downloaded
+
+            except Exception as e:
+                logger.warning(
+                    f"Part {part_id} stream interrupted ({e}). "
+                    f"Resuming at byte {start_byte + part_downloaded} (attempt {attempt + 1}/{max_part_retries})..."
+                )
+                if attempt == max_part_retries - 1:
+                    raise DownloadError(f"Part {part_id} failed after {max_part_retries} attempts: {e}")
+                await asyncio.sleep(1 + attempt)
+
+        return part_downloaded
 
     async def _download_parallel(
         self,
