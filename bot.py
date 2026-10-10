@@ -473,7 +473,7 @@ async def process_terabox_link(
                 buttons=make_stop_btn(user_id),
             )
             await asyncio.sleep(1.5)
-
+        target_chat_id = config.PRIVATE_CHAT_ID if config.PRIVATE_CHAT_ID else event.chat_id
         album_paths = []
         album_captions = []
         album_size = 0
@@ -484,19 +484,45 @@ async def process_terabox_link(
             nonlocal album_paths, album_captions, album_size
             if not album_paths:
                 return
+
+            last_album_edit = 0.0
+            album_count = len(album_paths)
+
+            async def album_item_progress(item_idx: int, total_items: int, curr: int, tot: int, spd: float, item_name: str):
+                nonlocal last_album_edit
+                now = time.monotonic()
+                if now - last_album_edit >= 2.0 or curr == tot:
+                    last_album_edit = now
+                    txt = render_progress_text(
+                        action=f"📤 Uploading Photo [{item_idx}/{total_items}]",
+                        filename=item_name,
+                        current=curr,
+                        total=tot,
+                        speed=spd,
+                    )
+                    try:
+                        await status_msg.edit(txt, buttons=make_stop_btn(user_id))
+                    except Exception:
+                        pass
+
             try:
                 await status_msg.edit(
-                    f"📤 Uploading Album ({len(album_paths)} items) to Telegram...",
+                    f"📤 **Uploading Album ({album_count} items) to Telegram...**\n"
+                    f"⚡ *Pre-uploading with 16 parallel workers...*",
                     buttons=make_stop_btn(user_id),
                 )
-                if config.PRIVATE_CHAT_ID:
-                    msgs = await client.send_file(config.PRIVATE_CHAT_ID, album_paths, caption=album_captions)
+                msgs = await uploader.upload_album(
+                    chat_id=target_chat_id,
+                    file_paths=album_paths,
+                    captions=album_captions,
+                    progress_callback=album_item_progress,
+                    workers=16,
+                )
+                if config.PRIVATE_CHAT_ID and msgs:
                     await client.forward_messages(event.chat_id, msgs)
-                else:
-                    await client.send_file(event.chat_id, album_paths, caption=album_captions)
             except Exception as e:
-                logger.error(f"Album upload failed: {e}")
-                
+                logger.error(f"Album upload failed: {e}", exc_info=True)
+
             for p in album_paths:
                 try:
                     if p.exists(): p.unlink()
@@ -525,16 +551,17 @@ async def process_terabox_link(
                 await event.reply(oversize_msg)
                 continue
 
-            # If Large file (> 100MB) OR Single File -> Standalone Fast Upload
-            if file_obj.size > ALBUM_MAX_SIZE or not is_multi_file:
+            # If Large file (> 100MB) OR Single File OR Video -> Standalone Fast Upload
+            is_video = is_video_file(Path(file_obj.file_name))
+            if file_obj.size > ALBUM_MAX_SIZE or not is_multi_file or is_video:
                 await flush_album()
-                
+
                 # Standalone download
                 last_edit_time = 0.0
                 async def download_progress(current: int, total: int, speed: float):
                     nonlocal last_edit_time
                     now = time.monotonic()
-                    if now - last_edit_time >= 3.0 or current == total:
+                    if now - last_edit_time >= 2.0 or current == total:
                         last_edit_time = now
                         txt = render_progress_text(f"📥 {file_prefix}Downloading", file_obj.file_name, current, total, speed)
                         try:
@@ -557,7 +584,7 @@ async def process_terabox_link(
                 async def upload_progress(current: int, total: int, speed: float):
                     nonlocal last_upload_edit
                     now = time.monotonic()
-                    if now - last_upload_edit >= 3.5 or current == total:
+                    if now - last_upload_edit >= 2.0 or current == total:
                         last_upload_edit = now
                         txt = render_progress_text(f"📤 {file_prefix}Uploading to Telegram", file_obj.file_name, current, total, speed)
                         try:
@@ -570,17 +597,16 @@ async def process_terabox_link(
                     caption += f"⏱ **Duration**: {format_duration(file_obj.duration)}\n"
 
                 try:
-                    if config.PRIVATE_CHAT_ID:
-                        channel_msg = await uploader.upload_media(
-                            chat_id=config.PRIVATE_CHAT_ID, file_path=downloaded_file,
-                            caption=caption, thumb_path=None, progress_callback=upload_progress
-                        )
-                        await client.forward_messages(event.chat_id, channel_msg)
-                    else:
-                        await uploader.upload_media(
-                            chat_id=event.chat_id, file_path=downloaded_file,
-                            caption=caption, thumb_path=None, progress_callback=upload_progress
-                        )
+                    sent_msg = await uploader.upload_media(
+                        chat_id=target_chat_id,
+                        file_path=downloaded_file,
+                        caption=caption,
+                        thumb_path=None,
+                        progress_callback=upload_progress,
+                        workers=16,
+                    )
+                    if config.PRIVATE_CHAT_ID and sent_msg:
+                        await client.forward_messages(event.chat_id, sent_msg)
                 except Exception as up_err:
                     await event.reply(f"❌ {file_prefix}**Upload Failed**\n\n{str(up_err)}")
                 finally:

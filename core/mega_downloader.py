@@ -941,6 +941,7 @@ async def stream_and_upload_nodes(
         await asyncio.sleep(1.0)
 
         uploader = TelethonUploader(event.client)
+        target_chat_id = config.PRIVATE_CHAT_ID if config.PRIVATE_CHAT_ID else event.chat_id
         album_paths = []
         album_captions = []
         album_size = 0
@@ -951,18 +952,44 @@ async def stream_and_upload_nodes(
             nonlocal album_paths, album_captions, album_size
             if not album_paths:
                 return
+
+            last_album_edit = 0.0
+            album_count = len(album_paths)
+
+            async def album_item_progress(item_idx: int, total_items: int, curr: int, tot: int, spd: float, item_name: str):
+                nonlocal last_album_edit
+                now = time.monotonic()
+                if now - last_album_edit >= 2.0 or curr == tot:
+                    last_album_edit = now
+                    txt = render_mega_progress(
+                        action=f"📤 Uploading Photo [{item_idx}/{total_items}]",
+                        name=item_name,
+                        current=curr,
+                        total=tot,
+                        speed=spd,
+                    )
+                    try:
+                        await status_msg.edit(txt, buttons=make_stop_btn(user_id))
+                    except Exception:
+                        pass
+
             try:
                 await status_msg.edit(
-                    f"📤 Uploading Album ({len(album_paths)} items) to Telegram...",
+                    f"📤 **Uploading Album ({album_count} photos) to Telegram...**\n"
+                    f"⚡ *Pre-uploading with 16 parallel workers...*",
                     buttons=make_stop_btn(user_id),
                 )
-                if config.PRIVATE_CHAT_ID:
-                    msgs = await event.client.send_file(config.PRIVATE_CHAT_ID, album_paths, caption=album_captions)
+                msgs = await uploader.upload_album(
+                    chat_id=target_chat_id,
+                    file_paths=album_paths,
+                    captions=album_captions,
+                    progress_callback=album_item_progress,
+                    workers=16,
+                )
+                if config.PRIVATE_CHAT_ID and msgs:
                     await event.client.forward_messages(event.chat_id, msgs)
-                else:
-                    await event.client.send_file(event.chat_id, album_paths, caption=album_captions)
             except Exception as e:
-                logger.error(f"Album upload failed: {e}")
+                logger.error(f"Album upload failed: {e}", exc_info=True)
 
             for p in album_paths:
                 try:
@@ -1005,7 +1032,7 @@ async def stream_and_upload_nodes(
                 async def dl_progress(current: int, total: int, speed: float):
                     nonlocal last_dl_edit
                     now = time.monotonic()
-                    if now - last_dl_edit >= 3.5 or current == total:
+                    if now - last_dl_edit >= 2.0 or current == total:
                         last_dl_edit = now
                         txt = render_mega_progress(
                             action=f"📥 {file_prefix}Downloading from Mega",
@@ -1034,22 +1061,22 @@ async def stream_and_upload_nodes(
 
                 actual_size = dest_path.stat().st_size
 
-                # Batch photos / small files into smart albums
+                # Batch photos into smart albums (videos & documents always uploaded standalone)
                 can_be_album_item = (
                     is_multi_file
                     and actual_size < ALBUM_MAX_SIZE
-                    and (is_photo_file(dest_path) or is_video_file(dest_path) or total_selected >= 3)
+                    and is_photo_file(dest_path)
                 )
 
                 if can_be_album_item:
                     if album_size + actual_size > ALBUM_MAX_SIZE or len(album_paths) >= ALBUM_MAX_ITEMS:
                         await flush_album()
                     album_paths.append(dest_path)
-                    album_captions.append(f"📁 **{dest_path.name}**\n☁️ `Mega.nz` • `{folder_name}`")
+                    album_captions.append(f"🖼️ **{dest_path.name}**\n☁️ `Mega.nz` • `{folder_name}`")
                     album_size += actual_size
                     continue
 
-                # Standalone media upload
+                # Standalone media upload (Videos, Documents, Archives, or Single Photos)
                 await flush_album()
 
                 thumb_path = None
@@ -1066,7 +1093,7 @@ async def stream_and_upload_nodes(
                 async def upload_progress(current: int, total: int, speed: float):
                     nonlocal last_upload_edit
                     now = time.monotonic()
-                    if now - last_upload_edit >= 3.5 or current == total:
+                    if now - last_upload_edit >= 2.0 or current == total:
                         last_upload_edit = now
                         txt = render_mega_progress(
                             action=f"📤 {file_prefix}Uploading to Telegram",
@@ -1087,14 +1114,17 @@ async def stream_and_upload_nodes(
                     f"☁️ **Source**: `Mega.nz`"
                 )
 
-                await uploader.upload_media(
+                sent_msg = await uploader.upload_media(
+                    chat_id=target_chat_id,
                     file_path=dest_path,
-                    reply_to_msg_id=event.id,
                     caption=caption,
                     thumb_path=thumb_path,
                     progress_callback=upload_progress,
-                    workers=12,
+                    workers=16,
                 )
+
+                if config.PRIVATE_CHAT_ID and sent_msg:
+                    await event.client.forward_messages(event.chat_id, sent_msg)
 
                 if thumb_path and thumb_path.exists():
                     try:
@@ -1357,6 +1387,7 @@ async def process_mega_link(
             return
 
         uploader = TelethonUploader(event.client)
+        target_chat_id = config.PRIVATE_CHAT_ID if config.PRIVATE_CHAT_ID else event.chat_id
         for f in all_downloaded:
             file_size = f.stat().st_size
             thumb_path = None
@@ -1368,13 +1399,36 @@ async def process_mega_link(
                 except Exception:
                     pass
 
-            await uploader.upload_media(
+            last_upload_edit = 0.0
+
+            async def upload_progress_cli(current: int, total: int, speed: float):
+                nonlocal last_upload_edit
+                now = time.monotonic()
+                if now - last_upload_edit >= 2.0 or current == total:
+                    last_upload_edit = now
+                    txt = render_mega_progress(
+                        action="📤 Uploading to Telegram",
+                        name=f.name,
+                        current=current,
+                        total=total,
+                        speed=speed,
+                    )
+                    try:
+                        await status_msg.edit(txt, buttons=make_stop_btn(user_id))
+                    except Exception:
+                        pass
+
+            sent_msg = await uploader.upload_media(
+                chat_id=target_chat_id,
                 file_path=f,
-                reply_to_msg_id=event.id,
                 caption=f"📁 **{f.name}**\n📦 `{format_bytes(file_size)}`\n☁️ `Mega.nz`",
                 thumb_path=thumb_path,
-                workers=12,
+                progress_callback=upload_progress_cli,
+                workers=16,
             )
+            if config.PRIVATE_CHAT_ID and sent_msg:
+                await event.client.forward_messages(event.chat_id, sent_msg)
+
             if thumb_path and thumb_path.exists():
                 try:
                     thumb_path.unlink()

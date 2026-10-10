@@ -19,7 +19,7 @@ async def fast_upload_file(
     client: TelegramClient,
     file_path: Path,
     part_size_kb: int = 512,
-    workers: int = 12,
+    workers: int = 16,
     progress_callback: Optional[Callable[[int, int, float], None]] = None,
     max_retries: int = 3,
 ) -> types.TypeInputFile:
@@ -105,7 +105,7 @@ async def fast_upload_file(
                     uploaded_bytes += length
                     now = time.monotonic()
                     elapsed = now - last_callback_time
-                    if progress_callback and (elapsed >= 3.0 or uploaded_bytes >= file_size):
+                    if progress_callback and (elapsed >= 2.0 or uploaded_bytes >= file_size):
                         bytes_diff = uploaded_bytes - last_callback_bytes
                         speed = bytes_diff / elapsed if elapsed > 0 else 0.0
                         last_callback_time = now
@@ -159,7 +159,7 @@ class TelethonUploader:
         thumb_path: Optional[Path] = None,
         progress_callback: Optional[Callable[[int, int, float], None]] = None,
         max_retries: int = 3,
-        workers: int = 12,
+        workers: int = 16,
     ):
         """
         Upload file using multi-connection fast parallel chunk transfer.
@@ -246,3 +246,58 @@ class TelethonUploader:
                         generated_thumb.unlink()
                     except Exception:
                         pass
+
+    async def upload_album(
+        self,
+        chat_id: int,
+        file_paths: list[Path],
+        captions: list[str],
+        progress_callback: Optional[Callable] = None,
+        max_retries: int = 3,
+        workers: int = 16,
+    ):
+        """
+        Fast parallel album uploader for Telethon.
+        Pre-uploads all files in parallel chunks with live progress tracking,
+        then transmits the entire album as an atomic group.
+        """
+        if not file_paths:
+            return None
+
+        uploaded_inputs = []
+        total_items = len(file_paths)
+        for idx, fp in enumerate(file_paths, 1):
+            if not fp.exists():
+                continue
+
+            async def file_progress(curr: int, tot: int, spd: float, item_idx=idx, item_name=fp.name):
+                if progress_callback:
+                    try:
+                        if asyncio.iscoroutinefunction(progress_callback):
+                            await progress_callback(item_idx, total_items, curr, tot, spd, item_name)
+                        else:
+                            progress_callback(item_idx, total_items, curr, tot, spd, item_name)
+                    except TypeError:
+                        if asyncio.iscoroutinefunction(progress_callback):
+                            await progress_callback(curr, tot, spd)
+                        else:
+                            progress_callback(curr, tot, spd)
+
+            input_file = await fast_upload_file(
+                client=self.client,
+                file_path=fp,
+                part_size_kb=512,
+                workers=workers,
+                progress_callback=file_progress if progress_callback else None,
+                max_retries=max_retries,
+            )
+            uploaded_inputs.append(input_file)
+
+        if not uploaded_inputs:
+            return None
+
+        return await self.client.send_file(
+            entity=chat_id,
+            file=uploaded_inputs,
+            caption=captions[: len(uploaded_inputs)],
+        )
