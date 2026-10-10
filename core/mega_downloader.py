@@ -1075,7 +1075,9 @@ async def stream_and_upload_nodes(
                 file_key = f"mg_{node['h']}"
 
                 # Storage Channel / DB cache check: If already in channel, forward instantly!
-                cached_msg = await db.find_cached_media(event.client, config.PRIVATE_CHAT_ID, file_key)
+                cached_msg = await db.find_cached_media(
+                    event.client, config.PRIVATE_CHAT_ID, file_key, file_name=file_name, file_size=file_size
+                )
                 if cached_msg:
                     logger.info(f"Storage cache hit for Mega node {node['h']} ({file_name})! Forwarding...")
                     await flush_album()

@@ -642,7 +642,9 @@ async def process_terabox_link(
             file_key = f"tb_{file_obj.fs_id}" if getattr(file_obj, "fs_id", None) else f"tb_{abs(hash(file_obj.file_name + str(file_obj.size)))}"
 
             # Storage Channel / DB cache check: If already in channel, forward instantly!
-            cached_msg = await db.find_cached_media(client, config.PRIVATE_CHAT_ID, file_key)
+            cached_msg = await db.find_cached_media(
+                client, config.PRIVATE_CHAT_ID, file_key, file_name=file_obj.file_name, file_size=file_obj.size
+            )
             if cached_msg:
                 logger.info(f"Storage cache hit for TeraBox file {file_obj.file_name}! Forwarding...")
                 await flush_album()

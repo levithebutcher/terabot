@@ -118,47 +118,92 @@ class Database:
             )
             await db.commit()
 
-    async def find_cached_media(self, client, channel_id: Optional[int], file_key: str):
+    async def find_cached_media(
+        self,
+        client,
+        channel_id: Optional[int],
+        file_key: str,
+        file_name: str = "",
+        file_size: int = 0,
+    ):
         """
         Search for a media item in local SQLite or the remote Storage Channel.
-        Returns the Telethon Message object if found, or None.
+        Supports:
+        1. Exact file_key in local SQLite cache
+        2. Exact hashtag search in channel (#file_key)
+        3. Smart Name & Size fallback (for older files manually forwarded into channel without ID)
         """
-        if not file_key:
+        if not file_key and not file_name:
             return None
 
         # 1. Check local SQLite cache first (super fast)
-        cached = await self.get_cached_file(file_key)
-        if cached:
-            c_id, msg_id = cached
-            try:
-                msg = await client.get_messages(c_id, ids=msg_id)
-                if msg and msg.media:
-                    return msg
-            except Exception as e:
-                logger.debug(f"Could not fetch cached message {msg_id} from {c_id}: {e}")
+        if file_key:
+            cached = await self.get_cached_file(file_key)
+            if cached:
+                c_id, msg_id = cached
+                try:
+                    msg = await client.get_messages(c_id, ids=msg_id)
+                    if msg and msg.media:
+                        return msg
+                except Exception as e:
+                    logger.debug(f"Could not fetch cached message {msg_id} from {c_id}: {e}")
 
         # 2. Check remote Storage Channel if channel_id is provided
         if channel_id:
-            tag = f"#{file_key}"
-            try:
-                async for msg in client.iter_messages(channel_id, search=tag, limit=1):
-                    if msg and msg.media:
-                        f_name = msg.file.name if getattr(msg, "file", None) else ""
-                        f_size = msg.file.size if getattr(msg, "file", None) else 0
-                        await self.save_cached_file(file_key, f_name, f_size, channel_id, msg.id)
-                        return msg
-            except Exception as e:
-                logger.debug(f"Search in channel failed ({e}), scanning recent messages...")
+            tag = f"#{file_key}" if file_key else ""
 
-            try:
-                async for msg in client.iter_messages(channel_id, limit=60):
-                    if msg and msg.media:
-                        caption = msg.text or msg.message or ""
-                        if tag in caption:
+            # Check by tag first
+            if tag:
+                try:
+                    async for msg in client.iter_messages(channel_id, search=tag, limit=1):
+                        if msg and msg.media:
                             f_name = msg.file.name if getattr(msg, "file", None) else ""
                             f_size = msg.file.size if getattr(msg, "file", None) else 0
                             await self.save_cached_file(file_key, f_name, f_size, channel_id, msg.id)
                             return msg
+                except Exception as e:
+                    logger.debug(f"Search in channel failed ({e}), scanning recent messages...")
+
+            # 3. Fallback: Search by file_name for older files forwarded to channel without ID tag
+            clean_name = file_name.strip().lower() if file_name else ""
+            if clean_name:
+                try:
+                    async for msg in client.iter_messages(channel_id, search=file_name, limit=5):
+                        if msg and msg.media:
+                            m_name = (msg.file.name or "").lower() if getattr(msg, "file", None) else ""
+                            m_caption = (msg.text or msg.message or "").lower()
+                            m_size = msg.file.size if getattr(msg, "file", None) else 0
+                            if clean_name in m_name or clean_name in m_caption or m_name in clean_name:
+                                if file_size == 0 or abs(m_size - file_size) < 2 * 1024 * 1024:
+                                    logger.info(f"Matched old forwarded file by name: {file_name}")
+                                    if file_key:
+                                        await self.save_cached_file(file_key, file_name, m_size, channel_id, msg.id)
+                                    return msg
+                except Exception:
+                    pass
+
+            # 4. Scan recent channel messages for tag OR filename + size
+            try:
+                async for msg in client.iter_messages(channel_id, limit=60):
+                    if msg and msg.media:
+                        caption = msg.text or msg.message or ""
+                        m_name = (msg.file.name or "").lower() if getattr(msg, "file", None) else ""
+                        m_size = msg.file.size if getattr(msg, "file", None) else 0
+
+                        # Match tag
+                        if tag and tag in caption:
+                            f_name = msg.file.name if getattr(msg, "file", None) else ""
+                            f_size = msg.file.size if getattr(msg, "file", None) else 0
+                            await self.save_cached_file(file_key, f_name, f_size, channel_id, msg.id)
+                            return msg
+
+                        # Match older forwarded file by filename & size
+                        if clean_name and (clean_name in m_name or clean_name in caption.lower()):
+                            if file_size == 0 or abs(m_size - file_size) < 2 * 1024 * 1024:
+                                logger.info(f"Matched old forwarded file from channel history: {file_name}")
+                                if file_key:
+                                    await self.save_cached_file(file_key, file_name, m_size, channel_id, msg.id)
+                                return msg
             except Exception as e2:
                 logger.debug(f"Recent channel scan failed: {e2}")
 
