@@ -282,31 +282,37 @@ async def process_mega_link(
                     future = loop.create_future()
                     pending_prompts[session_id] = (user_id, future)
 
+                    video_bytes = sum(f["size"] for f in folder_info["videos"])
+                    photo_bytes = sum(f["size"] for f in folder_info["photos"])
+                    other_bytes = sum(f["size"] for f in folder_info["others"])
+
                     buttons = []
                     row1 = []
                     if num_videos > 0:
-                        row1.append(Button.inline(f"🎬 Only Videos ({num_videos})", data=f"act:video:{session_id}"))
+                        row1.append(Button.inline("🎬 Videos", data=f"act:video:{session_id}"))
                     if num_photos > 0:
-                        row1.append(Button.inline(f"🖼️ Only Photos ({num_photos})", data=f"act:photo:{session_id}"))
+                        row1.append(Button.inline("🖼️ Photos", data=f"act:photo:{session_id}"))
                     if row1:
                         buttons.append(row1)
 
                     row2 = []
                     if num_others > 0:
-                        row2.append(Button.inline(f"📄 Others ({num_others})", data=f"act:other:{session_id}"))
-                    row2.append(Button.inline(f"📁 Download All ({raw_count})", data=f"act:all:{session_id}"))
+                        row2.append(Button.inline("📄 Others", data=f"act:other:{session_id}"))
+                    row2.append(Button.inline("📁 Download All", data=f"act:all:{session_id}"))
                     buttons.append(row2)
 
                     buttons.append([Button.inline("❌ Cancel", data=f"act:cancel:{session_id}")])
 
                     msg_text = (
                         f"📂 **Folder Discovered (Mega.nz)**\n\n"
-                        f"📊 **Total Files**: `{raw_count}` (`{total_sz_readable}`)\n"
-                        f"• 🎬 **Videos**: `{num_videos}`\n"
-                        f"• 🖼️ **Photos**: `{num_photos}`\n"
+                        f"📊 **Total Content**: `{raw_count} Files` • `{total_sz_readable}`\n"
                     )
+                    if num_videos > 0:
+                        msg_text += f"• 🎬 **Videos**: `{num_videos} Files` (~`{format_bytes(video_bytes)}`)\n"
+                    if num_photos > 0:
+                        msg_text += f"• 🖼️ **Photos**: `{num_photos} Files` (~`{format_bytes(photo_bytes)}`)\n"
                     if num_others > 0:
-                        msg_text += f"• 📄 **Other Files**: `{num_others}`\n"
+                        msg_text += f"• 📄 **Others**: `{num_others} Files` (~`{format_bytes(other_bytes)}`)\n"
                     msg_text += "\n👇 **Aapko kya download karna hai? Choose karo:**"
 
                     await status_msg.edit(msg_text, buttons=buttons)

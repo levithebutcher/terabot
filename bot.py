@@ -379,31 +379,38 @@ async def process_terabox_link(
             future = loop.create_future()
             pending_prompts[session_id] = (user_id, future)
 
+            total_bytes = sum(f.size for f in files)
+            video_bytes = sum(f.size for f in video_files)
+            photo_bytes = sum(f.size for f in photo_files)
+            other_bytes = sum(f.size for f in other_files)
+
             buttons = []
             row1 = []
             if len(video_files) > 0:
-                row1.append(Button.inline(f"🎬 Only Videos ({len(video_files)})", data=f"act:video:{session_id}"))
+                row1.append(Button.inline("🎬 Videos", data=f"act:video:{session_id}"))
             if len(photo_files) > 0:
-                row1.append(Button.inline(f"🖼️ Only Photos ({len(photo_files)})", data=f"act:photo:{session_id}"))
+                row1.append(Button.inline("🖼️ Photos", data=f"act:photo:{session_id}"))
             if row1:
                 buttons.append(row1)
 
             row2 = []
             if other_count > 0:
-                row2.append(Button.inline(f"📄 Others ({other_count})", data=f"act:other:{session_id}"))
-            row2.append(Button.inline(f"📁 Download All ({raw_count})", data=f"act:all:{session_id}"))
+                row2.append(Button.inline("📄 Others", data=f"act:other:{session_id}"))
+            row2.append(Button.inline("📁 Download All", data=f"act:all:{session_id}"))
             buttons.append(row2)
 
             buttons.append([Button.inline("❌ Cancel", data=f"act:cancel:{session_id}")])
 
             msg_text = (
-                f"📂 **Folder Discovered**\n\n"
-                f"📊 **Total Files**: `{raw_count}`\n"
-                f"• 🎬 **Videos**: `{len(video_files)}`\n"
-                f"• 🖼️ **Photos**: `{len(photo_files)}`\n"
+                f"📂 **Folder Discovered (TeraBox)**\n\n"
+                f"📊 **Total Content**: `{raw_count} Files` • `{format_bytes(total_bytes)}`\n"
             )
+            if len(video_files) > 0:
+                msg_text += f"• 🎬 **Videos**: `{len(video_files)} Files` (~`{format_bytes(video_bytes)}`)\n"
+            if len(photo_files) > 0:
+                msg_text += f"• 🖼️ **Photos**: `{len(photo_files)} Files` (~`{format_bytes(photo_bytes)}`)\n"
             if other_count > 0:
-                msg_text += f"• 📄 **Other Files**: `{other_count}`\n"
+                msg_text += f"• 📄 **Others**: `{other_count} Files` (~`{format_bytes(other_bytes)}`)\n"
             msg_text += "\n👇 **Aapko kya download karna hai? Choose karo:**"
 
             await status_msg.edit(msg_text, buttons=buttons)
