@@ -4,11 +4,12 @@ FROM python:3.11-slim
 ENV PYTHONDONTWRITEBYTECODE=1
 ENV PYTHONUNBUFFERED=1
 
-# Install system dependencies (ffmpeg is essential for video metadata and thumbnails)
+# Install system dependencies (ffmpeg for video thumbnails, megatools for Mega downloads)
 RUN apt-get update && apt-get install -y --no-install-recommends \
     ffmpeg \
     curl \
     ca-certificates \
+    megatools \
     && rm -rf /var/lib/apt/lists/*
 
 # Set working directory

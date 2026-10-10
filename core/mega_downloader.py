@@ -1,98 +1,348 @@
 import asyncio
+import os
 import re
 import shutil
-from pathlib import Path
 import time
-from telethon import events
-from config import DOWNLOAD_DIR, ADMIN_IDS
-from utils.logger import logger
+from pathlib import Path
+from typing import Optional, Tuple
+
+from telethon import Button, events
+
+from config import ADMIN_IDS, DOWNLOAD_DIR
+from core.media import generate_video_thumbnail, get_video_metadata, is_video_file
+from core.queue_manager import queue_mgr
 from core.uploader import TelethonUploader
-from core.media import is_video_file, get_video_metadata, generate_video_thumbnail
+from utils.helpers import format_bytes, format_duration
+from utils.logger import logger
+
+
+# Comprehensive regex matching all Mega link variations (modern & legacy)
+MEGA_URL_REGEX = re.compile(
+    r"https?://(?:www\.)?mega\.(?:nz|co\.nz)/(?:file/|folder/|embed/|#|#!|#F!)[a-zA-Z0-9_\-\~]+(?:[#!][a-zA-Z0-9_\-\~]+)?",
+    re.IGNORECASE,
+)
+
+
+def is_mega_url(url: str) -> bool:
+    """Return True if the URL is a recognized Mega.nz file or folder link."""
+    return bool(MEGA_URL_REGEX.search(url))
+
+
+def make_stop_btn(user_id: int):
+    """Generate inline stop button for progress messages."""
+    return [[Button.inline("🛑 Abort Task", data=f"stop:{user_id}")]]
+
+
+def render_mega_progress(action: str, name: str, current: int, total: int, speed: float) -> str:
+    """Render a clean progress bar string matching the bot's visual theme."""
+    bar_width = 12
+    speed_mb = speed / (1024 * 1024) if speed > 0 else 0.0
+
+    if total > 0:
+        percent = (current / total) * 100.0
+        filled = int(bar_width * current // total)
+        bar = "▰" * filled + "▱" * (bar_width - filled)
+        remaining = total - current
+        eta = remaining / speed if speed > 0 else 0
+        eta_str = format_duration(eta)
+        return (
+            f"**{action}**: `{name}`\n\n"
+            f"[{bar}] **{percent:.1f}%**\n"
+            f"⚡ **Speed**: `{speed_mb:.2f} MB/s`\n"
+            f"📦 **Processed**: `{format_bytes(current)}` / `{format_bytes(total)}`\n"
+            f"⏱ **ETA**: `{eta_str}`"
+        )
+    else:
+        return (
+            f"**{action}**: `{name}`\n\n"
+            f"⚡ **Speed**: `{speed_mb:.2f} MB/s`\n"
+            f"📦 **Downloaded**: `{format_bytes(current)}`\n"
+            f"⏳ **Status**: `Streaming high-speed chunks from Mega...`"
+        )
+
+
+def detect_mega_engine() -> Tuple[Optional[str], Optional[list[str]]]:
+    """
+    Detect available Mega CLI download engine on the host system.
+    Returns (engine_name, base_cmd_list) or (None, None).
+    """
+    # 1. Prefer official MEGAcmd (mega-get)
+    if shutil.which("mega-get"):
+        return "mega-cmd", ["mega-get", "--ignore-quota-warn"]
+
+    # 2. Fallback to megatools (megadl)
+    if shutil.which("megadl"):
+        return "megatools", ["megadl"]
+
+    return None, None
+
 
 async def process_mega_link(event: events.NewMessage.Event, url: str):
     """
-    Handle downloading from Mega.nz using mega-get CLI, and uploading to Telegram.
+    Handle downloading from Mega.nz (file or folder) and uploading to Telegram.
+    Includes live progress tracking, inline abort button, quota handling, and disk cleanup.
     """
     user_id = event.sender_id
-    status_msg = await event.reply("🔍 **Resolving Mega link...**")
-    
-    # 1. Prepare local directory
-    safe_id = str(time.time()).replace(".", "")
-    local_dir = DOWNLOAD_DIR / f"mega_{safe_id}"
-    local_dir.mkdir(parents=True, exist_ok=True)
-    
+    status_msg = None
+    slot_acquired = False
+    process = None
+    monitor_task = None
+    stop_monitor = asyncio.Event()
+
+    # Rate limiting & concurrency slot check (Admins bypass)
+    if user_id not in ADMIN_IDS:
+        can_proceed, reason = await queue_mgr.can_process_user(user_id)
+        if not can_proceed:
+            await event.reply(reason)
+            return
+
+    queue_pos = await queue_mgr.acquire_slot(user_id)
+    slot_acquired = True
+
     try:
-        # 2. Start mega-get as an async subprocess
-        await status_msg.edit("📥 **Downloading from Mega...**\n(Using official MEGAcmd)")
-        
+        if queue_pos > 1:
+            status_msg = await event.reply(
+                f"⏳ **Queued in slot #{queue_pos}**\nYour Mega download will begin shortly...",
+                buttons=make_stop_btn(user_id),
+            )
+        await queue_mgr.enter_worker()
+
+        # Engine detection
+        engine_name, base_cmd = detect_mega_engine()
+        if not engine_name or not base_cmd:
+            err_msg = (
+                "❌ **Mega Downloader Engine Not Installed!**\n\n"
+                "Host environment does not have `mega-cmd` or `megatools` installed.\n"
+                "• **Debian/Ubuntu/Colab setup**:\n"
+                "`sudo apt update && sudo apt install -y megatools`\n"
+                "or install official MEGAcmd:\n"
+                "`wget https://mega.nz/linux/repo/xUbuntu_22.04/amd64/megacmd-xUbuntu_22.04_amd64.deb && sudo apt install ./megacmd-xUbuntu_22.04_amd64.deb`"
+            )
+            if status_msg:
+                await status_msg.edit(err_msg, buttons=None)
+            else:
+                await event.reply(err_msg)
+            return
+
+        # Prepare isolated download directory
+        safe_id = f"{int(time.time())}_{user_id}"
+        local_dir = DOWNLOAD_DIR / f"mega_{safe_id}"
+        local_dir.mkdir(parents=True, exist_ok=True)
+
+        if not status_msg:
+            status_msg = await event.reply("🔍 **Resolving Mega link...**", buttons=make_stop_btn(user_id))
+        else:
+            await status_msg.edit("🔍 **Resolving Mega link...**", buttons=make_stop_btn(user_id))
+
+        # Build download command
+        if engine_name == "mega-cmd":
+            cmd = base_cmd + [url, str(local_dir)]
+        else:  # megatools
+            cmd = base_cmd + ["--path", str(local_dir), url]
+
+        logger.info(f"Starting Mega download [{engine_name}] for user {user_id}: {url[:60]}")
+        await status_msg.edit(f"📥 **Downloading from Mega...**\n`Engine: {engine_name}`", buttons=make_stop_btn(user_id))
+
         process = await asyncio.create_subprocess_exec(
-            "mega-get", url, str(local_dir),
+            *cmd,
             stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.PIPE
+            stderr=asyncio.subprocess.PIPE,
         )
-        
-        # Read stdout to parse progress (Wait for completion)
+
+        # Background progress monitor tracking downloaded bytes on disk
+        async def monitor_download_progress():
+            last_bytes = 0
+            last_time = time.monotonic()
+            last_edit = 0.0
+
+            while not stop_monitor.is_set():
+                await asyncio.sleep(2.0)
+                if stop_monitor.is_set():
+                    break
+
+                try:
+                    total_bytes = sum(f.stat().st_size for f in local_dir.rglob("*") if f.is_file())
+                except Exception:
+                    total_bytes = 0
+
+                now = time.monotonic()
+                dt = now - last_time
+                if dt > 0:
+                    speed = (total_bytes - last_bytes) / dt
+                    last_bytes = total_bytes
+                    last_time = now
+
+                    if now - last_edit >= 3.0 and total_bytes > 0:
+                        last_edit = now
+                        progress_txt = render_mega_progress(
+                            action="📥 Downloading from Mega",
+                            name=f"Engine: {engine_name}",
+                            current=total_bytes,
+                            total=0,
+                            speed=max(0.0, speed),
+                        )
+                        try:
+                            await status_msg.edit(progress_txt, buttons=make_stop_btn(user_id))
+                        except Exception:
+                            pass
+
+        monitor_task = asyncio.create_task(monitor_download_progress())
+
+        # Wait for download completion
         stdout, stderr = await process.communicate()
-        
+        stop_monitor.set()
+        if monitor_task:
+            monitor_task.cancel()
+
+        # Check return code & parse errors
         if process.returncode != 0:
             err_output = (stderr.decode().strip() or stdout.decode().strip())
-            logger.error(f"Mega CLI Error: {err_output}")
-            if "Bandwidth quota exceeded" in err_output or "Transfer quota exceeded" in err_output or "509" in err_output:
-                await status_msg.edit("❌ **Mega Bandwidth Quota Exceeded!**\nPlease wait a few hours or change your server IP/proxy.")
-            elif "not found" in err_output.lower():
-                await status_msg.edit("❌ **Mega Link Invalid or Expired!**")
+            logger.error(f"Mega download failed (code {process.returncode}): {err_output}")
+
+            if any(term in err_output.lower() for term in ["bandwidth quota", "transfer quota", "error -17", "509"]):
+                await status_msg.edit(
+                    "❌ **Mega Bandwidth Quota Exceeded!**\n\n"
+                    "Mega's free IP transfer quota limit has been reached.\n"
+                    "Please wait a few hours for the quota to reset or try again later.",
+                    buttons=None,
+                )
+            elif any(term in err_output.lower() for term in ["decryption error", "key", "invalid key"]):
+                await status_msg.edit(
+                    "❌ **Mega Decryption Error!**\n\n"
+                    "The decryption key in the link is invalid, incomplete, or corrupted.",
+                    buttons=None,
+                )
+            elif "not found" in err_output.lower() or "does not exist" in err_output.lower():
+                await status_msg.edit(
+                    "❌ **Mega File Not Found!**\n\n"
+                    "The requested file or folder has been deleted or expired.",
+                    buttons=None,
+                )
             else:
-                await status_msg.edit(f"❌ **Mega Download Failed:**\n`{err_output[-200:]}`")
+                await status_msg.edit(
+                    f"❌ **Mega Download Error:**\n`{err_output[-250:] if err_output else 'Unknown error'}`",
+                    buttons=None,
+                )
             return
-        
-        # 3. Walk downloaded files and upload to Telegram
-        await status_msg.edit("📤 **Uploading to Telegram...**")
-        uploader = TelethonUploader(event.client)
-        
-        files_to_upload = [f for f in local_dir.rglob("*") if f.is_file()]
+
+        # Locate downloaded files (supporting both single files and recursive folders)
+        files_to_upload = sorted([f for f in local_dir.rglob("*") if f.is_file() and not f.name.startswith(".")])
         if not files_to_upload:
-            await status_msg.edit("❌ **No files found in the Mega link.**")
+            await status_msg.edit("❌ **No files found in the downloaded Mega link.**", buttons=None)
             return
-            
-        for file_path in files_to_upload:
-            # Generate thumbnail if it's a video
+
+        total_files = len(files_to_upload)
+        total_folder_size = sum(f.stat().st_size for f in files_to_upload)
+        logger.info(f"Mega download complete for user {user_id}: {total_files} file(s), {format_bytes(total_folder_size)}")
+
+        # Initialize fast uploader
+        uploader = TelethonUploader(event.client)
+
+        for idx, file_path in enumerate(files_to_upload, start=1):
+            file_size = file_path.stat().st_size
+            file_prefix = f"[{idx}/{total_files}] " if total_files > 1 else ""
+
+            # Extract video metadata and generate thumbnail
             thumb_path = None
             if is_video_file(file_path.name):
-                meta = get_video_metadata(file_path)
-                if meta and meta.get("duration", 0) > 0:
-                    thumb_path = await generate_video_thumbnail(file_path, meta["duration"])
-            
-            # Simple progress callback to keep connection alive
-            last_edit_time = 0.0
+                try:
+                    meta = get_video_metadata(file_path)
+                    if meta and meta.get("duration", 0) > 0:
+                        thumb_path = await generate_video_thumbnail(file_path, meta["duration"])
+                except Exception as thumb_err:
+                    logger.warning(f"Failed to generate thumbnail for {file_path.name}: {thumb_err}")
+
+            # Throttled upload progress callback (FloodWait prevention)
+            last_upload_edit = 0.0
+
             async def upload_progress(current: int, total: int, speed: float):
-                nonlocal last_edit_time
+                nonlocal last_upload_edit
                 now = time.monotonic()
-                if now - last_edit_time >= 3.5 or current == total:
-                    last_edit_time = now
+                if now - last_upload_edit >= 3.5 or current == total:
+                    last_upload_edit = now
+                    txt = render_mega_progress(
+                        action=f"📤 {file_prefix}Uploading to Telegram",
+                        name=file_path.name,
+                        current=current,
+                        total=total,
+                        speed=speed,
+                    )
                     try:
-                        percent = (current / total) * 100 if total > 0 else 0
-                        await status_msg.edit(f"📤 **Uploading:** {file_path.name}\nProgress: {percent:.1f}%")
+                        await status_msg.edit(txt, buttons=make_stop_btn(user_id))
                     except Exception:
                         pass
-            
+
+            caption = (
+                f"📁 **{file_path.name}**\n"
+                f"📦 **Size**: `{format_bytes(file_size)}`\n"
+                f"☁️ **Source**: `Mega.nz`"
+            )
+
             await uploader.upload_media(
                 file_path=file_path,
                 reply_to_msg_id=event.id,
-                caption=f"📁 **{file_path.name}**\n\n📥 Downloaded via Mega",
+                caption=caption,
                 thumb_path=thumb_path,
-                progress_callback=upload_progress
+                progress_callback=upload_progress,
+                workers=12,
             )
-            
+
             if thumb_path and thumb_path.exists():
-                thumb_path.unlink()
-                
-        await status_msg.delete()
-        await event.reply("✅ **Mega Transfer Complete!**")
-        
+                try:
+                    thumb_path.unlink()
+                except Exception:
+                    pass
+
+        # Cleanup status message
+        if status_msg:
+            try:
+                await status_msg.delete()
+            except Exception:
+                pass
+
+        await event.reply(
+            f"✅ **Mega Transfer Complete!**\n"
+            f"Successfully uploaded {total_files} file(s) ({format_bytes(total_folder_size)})."
+        )
+
+    except asyncio.CancelledError:
+        logger.info(f"Mega task cancelled by user {user_id}")
+        stop_monitor.set()
+        if monitor_task:
+            monitor_task.cancel()
+        if process and process.returncode is None:
+            try:
+                process.kill()
+            except Exception:
+                pass
+        if status_msg:
+            try:
+                await status_msg.edit("🛑 **Mega task aborted by user.**", buttons=None)
+            except Exception:
+                pass
+        raise
+
     except Exception as e:
-        logger.error(f"Mega Error: {e}")
-        await status_msg.edit(f"❌ **Unexpected Error:** `{e}`")
+        logger.error(f"Unexpected Mega processing error: {e}", exc_info=True)
+        if status_msg:
+            try:
+                await status_msg.edit(f"❌ **An unexpected error occurred:**\n`{str(e)}`", buttons=None)
+            except Exception:
+                pass
+        else:
+            await event.reply(f"❌ **Failed to process Mega link:** {str(e)}")
+
     finally:
-        # 4. Clean up disk
-        if local_dir.exists():
+        stop_monitor.set()
+        if monitor_task and not monitor_task.done():
+            monitor_task.cancel()
+        if process and process.returncode is None:
+            try:
+                process.kill()
+            except Exception:
+                pass
+        # Guaranteed disk cleanup
+        if 'local_dir' in locals() and local_dir.exists():
             shutil.rmtree(local_dir, ignore_errors=True)
+        if slot_acquired:
+            queue_mgr.release_worker(user_id)

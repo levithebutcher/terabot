@@ -27,6 +27,7 @@ from core.resolver import (
     TeraFile,
 )
 from core.uploader import TelethonUploader
+from core.mega_downloader import is_mega_url, process_mega_link
 from utils.helpers import extract_urls, format_bytes, format_duration
 from utils.logger import logger
 
@@ -160,7 +161,8 @@ async def handle_help(event: events.NewMessage.Event):
         "• You can also send a link with `video` or `photo`:\n"
         "  `https://terabox.com/s/... video`\n\n"
         "🌐 **Supported Links**:\n"
-        "`terabox.com`, `terabox.app`, `1024tera.com`, `4funbox.com`, `mirrobox.com`, `nephobox.com`, `tibibox.com` and all mirror domains.\n\n"
+        "• **TeraBox**: `terabox.com`, `terabox.app`, `1024tera.com`, `4funbox.com`, `mirrobox.com`, `nephobox.com`, `tibibox.com` and all mirror domains.\n"
+        "• **Mega.nz**: `mega.nz/file/...`, `mega.nz/folder/...`, and legacy `mega.co.nz` links.\n\n"
         f"⚙️ **Limits**: Files up to `{config.MAX_FILE_SIZE_MB}` MB. Files larger than this will be delivered as direct browser links."
     )
     await event.reply(help_text)
@@ -727,9 +729,9 @@ async def handle_incoming_message(event: events.NewMessage.Event):
     # Process first found URL
     target_url = urls[0]
 
-    if "mega.nz" in target_url or "mega.co.nz" in target_url:
+    # Mega Link Dispatcher (handles files, folders, and legacy mega links)
+    if is_mega_url(target_url):
         logger.info(f"Routing Mega link from user {user_id}: {target_url[:50]}...")
-        from core.mega_downloader import process_mega_link
         task = asyncio.create_task(process_mega_link(event, target_url))
         active_tasks[user_id] = task
         return
