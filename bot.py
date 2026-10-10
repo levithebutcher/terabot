@@ -109,6 +109,8 @@ def render_progress_text(action: str, filename: str, current: int, total: int, s
 
 @client.on(events.NewMessage(pattern=r"^/start$", incoming=True, func=lambda e: not e.out))
 async def handle_start(event: events.NewMessage.Event):
+    if not event.is_private:
+        return
     sender = await event.get_sender()
     if not sender or getattr(sender, "bot", False):
         return
@@ -140,6 +142,8 @@ async def handle_start(event: events.NewMessage.Event):
 
 @client.on(events.NewMessage(pattern=r"^/help$", incoming=True, func=lambda e: not e.out))
 async def handle_help(event: events.NewMessage.Event):
+    if not event.is_private:
+        return
     sender = await event.get_sender()
     if not sender or getattr(sender, "bot", False):
         return
@@ -171,6 +175,8 @@ async def handle_help(event: events.NewMessage.Event):
 
 @client.on(events.NewMessage(pattern=r"^/ping$", incoming=True, func=lambda e: not e.out))
 async def handle_ping(event: events.NewMessage.Event):
+    if not event.is_private:
+        return
     sender = await event.get_sender()
     if not sender or getattr(sender, "bot", False):
         return
@@ -186,6 +192,8 @@ async def handle_ping(event: events.NewMessage.Event):
 
 @client.on(events.NewMessage(pattern=r"^/(?:filter|only)(?:\s+(.*))?$", incoming=True, func=lambda e: not e.out))
 async def handle_filter(event: events.NewMessage.Event):
+    if not event.is_private:
+        return
     sender = await event.get_sender()
     if not sender or getattr(sender, "bot", False):
         return
@@ -294,6 +302,8 @@ def update_env_file(key: str, value: str):
 
 @client.on(events.NewMessage(pattern=r"^/setchannel(?:\s+(-?\d+))?$", incoming=True, func=lambda e: not e.out))
 async def handle_set_channel(event: events.NewMessage.Event):
+    if not event.is_private:
+        return
     user_id = event.sender_id
     if user_id not in config.ADMIN_IDS:
         return
@@ -858,6 +868,8 @@ async def handle_stop_callback(event: events.CallbackQuery.Event):
 
 @client.on(events.NewMessage(pattern=r"(?i)^/(cancel|stop)$"))
 async def handle_cancel(event: events.NewMessage.Event):
+    if not event.is_private:
+        return
     user_id = event.sender_id
     if user_id in active_tasks:
         task = active_tasks.pop(user_id)
@@ -870,6 +882,29 @@ async def handle_cancel(event: events.NewMessage.Event):
 async def handle_incoming_message(event: events.NewMessage.Event):
     # Ignore outgoing messages sent by the bot itself
     if event.out:
+        return
+
+    # If message is posted in a Channel where the bot is Admin:
+    if event.is_channel:
+        # Automatically connect and save this storage channel!
+        if not config.PRIVATE_CHAT_ID or config.PRIVATE_CHAT_ID != event.chat_id:
+            config.PRIVATE_CHAT_ID = event.chat_id
+            update_env_file("PRIVATE_CHAT_ID", str(event.chat_id))
+            logger.info(f"Auto-detected storage channel ID: {event.chat_id}")
+            if config.ADMIN_IDS:
+                try:
+                    await client.send_message(
+                        config.ADMIN_IDS[0],
+                        f"✅ **Storage Channel Auto-Connected!**\n\n"
+                        f"🆔 **Channel ID**: `{event.chat_id}`\n\n"
+                        f"🚀 Ab se saari videos is channel mein cache hongi aur instant forward hongi!",
+                    )
+                except Exception as notify_err:
+                    logger.warning(f"Failed to notify admin of channel auto-detection: {notify_err}")
+        return  # Never post command/access responses inside the storage channel!
+
+    # Only process private 1-on-1 messages for downloads
+    if not event.is_private:
         return
 
     # Ignore messages sent by other bots
