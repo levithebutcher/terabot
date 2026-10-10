@@ -275,6 +275,48 @@ async def handle_broadcast(event: events.NewMessage.Event):
     await status_msg.edit(f"✅ **Broadcast complete**\n\n• Sent: `{sent}`\n• Failed: `{failed}`")
 
 
+def update_env_file(key: str, value: str):
+    """Persistently update a key in .env file."""
+    try:
+        env_path = Path(".env")
+        if env_path.exists():
+            content = env_path.read_text(encoding="utf-8")
+            pattern = rf"^{key}=.*$"
+            if re.search(pattern, content, flags=re.MULTILINE):
+                new_content = re.sub(pattern, f"{key}={value}", content, flags=re.MULTILINE)
+            else:
+                new_content = content.rstrip() + f"\n{key}={value}\n"
+            env_path.write_text(new_content, encoding="utf-8")
+            logger.info(f"Updated .env: {key}={value}")
+    except Exception as err:
+        logger.warning(f"Could not update .env for {key}: {err}")
+
+
+@client.on(events.NewMessage(pattern=r"^/setchannel(?:\s+(-?\d+))?$", incoming=True, func=lambda e: not e.out))
+async def handle_set_channel(event: events.NewMessage.Event):
+    user_id = event.sender_id
+    if user_id not in config.ADMIN_IDS:
+        return
+    channel_arg = event.pattern_match.group(1)
+    if not channel_arg:
+        await event.reply(
+            "⚠️ **Usage**: `/setchannel -100xxxxxxxxxx`\n\n"
+            "💡 _Tip: Ya fir apne storage channel se koi bhi message bot ko forward kar do!_"
+        )
+        return
+    try:
+        full_chat_id = int(channel_arg.strip())
+        config.PRIVATE_CHAT_ID = full_chat_id
+        update_env_file("PRIVATE_CHAT_ID", str(full_chat_id))
+        await event.reply(
+            f"✅ **Storage Channel Successfully Set!**\n\n"
+            f"🆔 **Channel ID**: `{full_chat_id}`\n\n"
+            f"🚀 Ab se saari videos is channel mein cache hongi aur yahan se auto-forward hongi!"
+        )
+    except Exception as e:
+        await event.reply(f"❌ Error setting channel ID: `{e}`")
+
+
 # ---------------- LINK DOWNLOAD PROCESSOR ---------------- #
 
 async def download_thumbnail(thumb_url: str, output_path: Path) -> Optional[Path]:
@@ -478,6 +520,7 @@ async def process_terabox_link(
         target_chat_id = config.PRIVATE_CHAT_ID if config.PRIVATE_CHAT_ID else event.chat_id
         album_paths = []
         album_captions = []
+        album_keys = []
         album_size = 0
         VIDEO_ALBUM_MAX_SIZE = 20 * 1024 * 1024   # 20 MB max per video in album
         PHOTO_ALBUM_MAX_SIZE = 100 * 1024 * 1024  # 100 MB max per photo in album
@@ -485,7 +528,7 @@ async def process_terabox_link(
         ALBUM_MAX_ITEMS = 10
 
         async def flush_album():
-            nonlocal album_paths, album_captions, album_size
+            nonlocal album_paths, album_captions, album_keys, album_size
             if not album_paths:
                 return
 
@@ -532,6 +575,16 @@ async def process_terabox_link(
                 if config.PRIVATE_CHAT_ID and msgs:
                     await client.forward_messages(event.chat_id, msgs)
 
+                # Save cache for album items
+                if msgs and isinstance(msgs, list):
+                    for k, p, m in zip(album_keys, album_paths, msgs):
+                        if k and m:
+                            try:
+                                sz = p.stat().st_size if p.exists() else 0
+                                await db.save_cached_file(k, p.name, sz, target_chat_id, m.id)
+                            except Exception:
+                                pass
+
                 for p in album_paths:
                     try:
                         if p.exists(): p.unlink()
@@ -539,7 +592,7 @@ async def process_terabox_link(
                         pass
             except Exception as e:
                 logger.error(f"Album upload failed: {e}. Falling back to standalone uploads...", exc_info=True)
-                for p, cap in zip(album_paths, album_captions):
+                for p, cap, k in zip(album_paths, album_captions, album_keys):
                     if not p.exists():
                         continue
                     try:
@@ -552,6 +605,8 @@ async def process_terabox_link(
                         )
                         if config.PRIVATE_CHAT_ID and sent:
                             await client.forward_messages(event.chat_id, sent)
+                        if sent and k:
+                            await db.save_cached_file(k, p.name, p.stat().st_size, target_chat_id, sent.id)
                     except Exception as fallback_err:
                         logger.error(f"Fallback upload failed for {p.name}: {fallback_err}")
                     finally:
@@ -562,6 +617,7 @@ async def process_terabox_link(
 
             album_paths.clear()
             album_captions.clear()
+            album_keys.clear()
             album_size = 0
 
         # Step 2: Process each file
@@ -582,6 +638,28 @@ async def process_terabox_link(
                 )
                 await event.reply(oversize_msg)
                 continue
+
+            file_key = f"tb_{file_obj.fs_id}" if getattr(file_obj, "fs_id", None) else f"tb_{abs(hash(file_obj.file_name + str(file_obj.size)))}"
+
+            # Storage Channel / DB cache check: If already in channel, forward instantly!
+            cached_msg = await db.find_cached_media(client, config.PRIVATE_CHAT_ID, file_key)
+            if cached_msg:
+                logger.info(f"Storage cache hit for TeraBox file {file_obj.file_name}! Forwarding...")
+                await flush_album()
+                try:
+                    await client.forward_messages(event.chat_id, cached_msg)
+                    await status_msg.edit(
+                        f"⚡ {file_prefix}**Found in Storage Channel!**\n\n"
+                        f"🎬 `{file_obj.file_name}`\n"
+                        f"⏩ Forwarded instantly to your chat without re-downloading!",
+                        buttons=make_stop_btn(user_id),
+                    )
+                    await asyncio.sleep(0.8)
+                except Exception as fwd_err:
+                    logger.warning(f"Forward failed ({fwd_err}), proceeding to download...")
+                    cached_msg = None
+                if cached_msg:
+                    continue
 
             file_path_obj = Path(file_obj.file_name)
             is_photo = is_photo_file(file_path_obj)
@@ -642,9 +720,7 @@ async def process_terabox_link(
                         except Exception:
                             pass
 
-                caption = f"📄 **{file_obj.file_name}**\n\n💾 **Size**: {file_obj.size_readable}\n"
-                if file_obj.duration > 0:
-                    caption += f"⏱ **Duration**: {format_duration(file_obj.duration)}\n"
+                caption = f"🎬 `{file_obj.file_name}` (`{file_obj.size_readable}`)\n`#{file_key}`"
 
                 try:
                     sent_msg = await uploader.upload_media(
@@ -655,8 +731,10 @@ async def process_terabox_link(
                         progress_callback=upload_progress,
                         workers=10,
                     )
-                    if config.PRIVATE_CHAT_ID and sent_msg:
-                        await client.forward_messages(event.chat_id, sent_msg)
+                    if sent_msg:
+                        if config.PRIVATE_CHAT_ID:
+                            await client.forward_messages(event.chat_id, sent_msg)
+                        await db.save_cached_file(file_key, file_obj.file_name, file_obj.size, target_chat_id, sent_msg.id)
                 except Exception as up_err:
                     await event.reply(f"❌ {file_prefix}**Upload Failed**\n\n{str(up_err)}")
                 finally:
@@ -684,8 +762,9 @@ async def process_terabox_link(
                     expected_size=file_obj.size, progress_callback=download_progress_album
                 )
                 album_paths.append(downloaded_file)
+                album_keys.append(file_key)
                 icon = "🎬" if is_video else "🖼️"
-                album_captions.append(f"{icon} **{file_obj.file_name}**")
+                album_captions.append(f"{icon} `{file_obj.file_name}` (`{file_obj.size_readable}`)\n`#{file_key}`")
                 album_size += file_obj.size
 
                 # If batch reached 10 items or 200MB, upload this completed batch immediately!
@@ -814,6 +893,23 @@ async def handle_incoming_message(event: events.NewMessage.Event):
 
     urls = extract_urls(event.raw_text)
     if not urls:
+        # Check if admin forwarded a post from a storage channel to configure PRIVATE_CHAT_ID
+        if user_id in config.ADMIN_IDS and event.fwd_from:
+            fwd_channel_id = getattr(event.fwd_from, "channel_id", None)
+            if not fwd_channel_id and getattr(event.fwd_from, "from_id", None):
+                fwd_channel_id = getattr(event.fwd_from.from_id, "channel_id", None)
+            if fwd_channel_id:
+                full_chat_id = int(f"-100{fwd_channel_id}") if not str(fwd_channel_id).startswith("-100") else int(fwd_channel_id)
+                config.PRIVATE_CHAT_ID = full_chat_id
+                update_env_file("PRIVATE_CHAT_ID", str(full_chat_id))
+                await event.reply(
+                    f"✅ **Storage Channel Successfully Connected!**\n\n"
+                    f"🆔 **Channel ID**: `{full_chat_id}`\n\n"
+                    f"🚀 Ab se saari videos is channel mein upload hokar instant forward hongi, "
+                    f"aur dubara aane par **0-second mein instant deliver** hongi!"
+                )
+                return
+
         # Check if user is replying to Mega folder search prompt
         if mega_mgr.has_awaiting_search(user_id):
             await mega_mgr.handle_search_input(event)

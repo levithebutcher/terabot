@@ -118,5 +118,51 @@ class Database:
             )
             await db.commit()
 
+    async def find_cached_media(self, client, channel_id: Optional[int], file_key: str):
+        """
+        Search for a media item in local SQLite or the remote Storage Channel.
+        Returns the Telethon Message object if found, or None.
+        """
+        if not file_key:
+            return None
+
+        # 1. Check local SQLite cache first (super fast)
+        cached = await self.get_cached_file(file_key)
+        if cached:
+            c_id, msg_id = cached
+            try:
+                msg = await client.get_messages(c_id, ids=msg_id)
+                if msg and msg.media:
+                    return msg
+            except Exception as e:
+                logger.debug(f"Could not fetch cached message {msg_id} from {c_id}: {e}")
+
+        # 2. Check remote Storage Channel if channel_id is provided
+        if channel_id:
+            tag = f"#{file_key}"
+            try:
+                async for msg in client.iter_messages(channel_id, search=tag, limit=1):
+                    if msg and msg.media:
+                        f_name = msg.file.name if getattr(msg, "file", None) else ""
+                        f_size = msg.file.size if getattr(msg, "file", None) else 0
+                        await self.save_cached_file(file_key, f_name, f_size, channel_id, msg.id)
+                        return msg
+            except Exception as e:
+                logger.debug(f"Search in channel failed ({e}), scanning recent messages...")
+
+            try:
+                async for msg in client.iter_messages(channel_id, limit=60):
+                    if msg and msg.media:
+                        caption = msg.text or msg.message or ""
+                        if tag in caption:
+                            f_name = msg.file.name if getattr(msg, "file", None) else ""
+                            f_size = msg.file.size if getattr(msg, "file", None) else 0
+                            await self.save_cached_file(file_key, f_name, f_size, channel_id, msg.id)
+                            return msg
+            except Exception as e2:
+                logger.debug(f"Recent channel scan failed: {e2}")
+
+        return None
+
 
 db = Database()

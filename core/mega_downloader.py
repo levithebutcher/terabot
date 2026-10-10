@@ -23,6 +23,7 @@ from core.media import (
     is_photo_file,
     is_video_file,
 )
+from core.database import db
 from core.queue_manager import queue_mgr
 from core.uploader import TelethonUploader
 from utils.helpers import format_bytes, format_duration
@@ -946,6 +947,7 @@ async def stream_and_upload_nodes(
         target_chat_id = config.PRIVATE_CHAT_ID if config.PRIVATE_CHAT_ID else event.chat_id
         album_paths = []
         album_captions = []
+        album_keys = []
         album_size = 0
         VIDEO_ALBUM_MAX_SIZE = 20 * 1024 * 1024   # 20 MB max per video in album
         PHOTO_ALBUM_MAX_SIZE = 100 * 1024 * 1024  # 100 MB max per photo in album
@@ -953,7 +955,7 @@ async def stream_and_upload_nodes(
         ALBUM_MAX_ITEMS = 10
 
         async def flush_album():
-            nonlocal album_paths, album_captions, album_size
+            nonlocal album_paths, album_captions, album_keys, album_size
             if not album_paths:
                 return
 
@@ -1000,6 +1002,16 @@ async def stream_and_upload_nodes(
                 if config.PRIVATE_CHAT_ID and msgs:
                     await event.client.forward_messages(event.chat_id, msgs)
 
+                # Save cache records for each uploaded album item
+                if msgs and isinstance(msgs, list):
+                    for k, p, m in zip(album_keys, album_paths, msgs):
+                        if k and m:
+                            try:
+                                sz = p.stat().st_size if p.exists() else 0
+                                await db.save_cached_file(k, p.name, sz, target_chat_id, m.id)
+                            except Exception:
+                                pass
+
                 # Delete successfully uploaded files
                 for p in album_paths:
                     try:
@@ -1009,7 +1021,7 @@ async def stream_and_upload_nodes(
                         pass
             except Exception as e:
                 logger.error(f"Album upload failed: {e}. Falling back to standalone uploads...", exc_info=True)
-                for p, cap in zip(album_paths, album_captions):
+                for p, cap, k in zip(album_paths, album_captions, album_keys):
                     if not p.exists():
                         continue
                     try:
@@ -1022,6 +1034,8 @@ async def stream_and_upload_nodes(
                         )
                         if config.PRIVATE_CHAT_ID and sent:
                             await event.client.forward_messages(event.chat_id, sent)
+                        if sent and k:
+                            await db.save_cached_file(k, p.name, p.stat().st_size, target_chat_id, sent.id)
                     except Exception as fallback_err:
                         logger.error(f"Fallback upload failed for {p.name}: {fallback_err}")
                     finally:
@@ -1033,6 +1047,7 @@ async def stream_and_upload_nodes(
 
             album_paths.clear()
             album_captions.clear()
+            album_keys.clear()
             album_size = 0
 
         timeout = aiohttp.ClientTimeout(total=None, connect=60, sock_read=60)
@@ -1056,6 +1071,28 @@ async def stream_and_upload_nodes(
                         f"⚠️ Exceeds Telegram's 2000 MB bot limit and was skipped."
                     )
                     continue
+
+                file_key = f"mg_{node['h']}"
+
+                # Storage Channel / DB cache check: If already in channel, forward instantly!
+                cached_msg = await db.find_cached_media(event.client, config.PRIVATE_CHAT_ID, file_key)
+                if cached_msg:
+                    logger.info(f"Storage cache hit for Mega node {node['h']} ({file_name})! Forwarding...")
+                    await flush_album()
+                    try:
+                        await event.client.forward_messages(event.chat_id, cached_msg)
+                        await status_msg.edit(
+                            f"⚡ {file_prefix}**Found in Storage Channel!**\n\n"
+                            f"🎬 `{file_name}`\n"
+                            f"⏩ Forwarded instantly to your chat without re-downloading!",
+                            buttons=make_stop_btn(user_id),
+                        )
+                        await asyncio.sleep(0.8)
+                    except Exception as fwd_err:
+                        logger.warning(f"Forward failed ({fwd_err}), proceeding to download...")
+                        cached_msg = None
+                    if cached_msg:
+                        continue
 
                 # Pre-download batch management:
                 node_ext = ("." + node["name"].split(".")[-1].lower()) if "." in node.get("name", "") else ""
@@ -1128,8 +1165,9 @@ async def stream_and_upload_nodes(
 
                 if can_be_album_item:
                     album_paths.append(dest_path)
+                    album_keys.append(file_key)
                     icon = "🎬" if is_video else "🖼️"
-                    album_captions.append(f"{icon} **{dest_path.name}**\n☁️ `Mega.nz` • `{folder_name}`")
+                    album_captions.append(f"{icon} `{dest_path.name}` (`{format_bytes(actual_size)}`)\n`#{file_key}`")
                     album_size += actual_size
 
                     # If batch reached 10 items or 200MB, upload this completed batch immediately!
@@ -1169,12 +1207,7 @@ async def stream_and_upload_nodes(
                         except Exception:
                             pass
 
-                caption = (
-                    f"📁 **{dest_path.name}**\n"
-                    f"📦 **Size**: `{format_bytes(actual_size)}`\n"
-                    f"📂 **Folder**: `{folder_name}`\n"
-                    f"☁️ **Source**: `Mega.nz`"
-                )
+                caption = f"🎬 `{dest_path.name}` (`{format_bytes(actual_size)}`)\n`#{file_key}`"
 
                 sent_msg = await uploader.upload_media(
                     chat_id=target_chat_id,
@@ -1185,8 +1218,10 @@ async def stream_and_upload_nodes(
                     workers=10,
                 )
 
-                if config.PRIVATE_CHAT_ID and sent_msg:
-                    await event.client.forward_messages(event.chat_id, sent_msg)
+                if sent_msg:
+                    if config.PRIVATE_CHAT_ID:
+                        await event.client.forward_messages(event.chat_id, sent_msg)
+                    await db.save_cached_file(file_key, dest_path.name, actual_size, target_chat_id, sent_msg.id)
 
                 if thumb_path and thumb_path.exists():
                     try:
@@ -1480,16 +1515,21 @@ async def process_mega_link(
                     except Exception:
                         pass
 
+            file_key = f"mg_{abs(hash(f.name + str(file_size)))}"
+            caption = f"🎬 `{f.name}` (`{format_bytes(file_size)}`)\n`#{file_key}`"
+
             sent_msg = await uploader.upload_media(
                 chat_id=target_chat_id,
                 file_path=f,
-                caption=f"📁 **{f.name}**\n📦 `{format_bytes(file_size)}`\n☁️ `Mega.nz`",
+                caption=caption,
                 thumb_path=thumb_path,
                 progress_callback=upload_progress_cli,
-                workers=16,
+                workers=10,
             )
-            if config.PRIVATE_CHAT_ID and sent_msg:
-                await event.client.forward_messages(event.chat_id, sent_msg)
+            if sent_msg:
+                if config.PRIVATE_CHAT_ID:
+                    await event.client.forward_messages(event.chat_id, sent_msg)
+                await db.save_cached_file(file_key, f.name, file_size, target_chat_id, sent_msg.id)
 
             if thumb_path and thumb_path.exists():
                 try:
