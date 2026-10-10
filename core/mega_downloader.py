@@ -947,9 +947,8 @@ async def stream_and_upload_nodes(
         album_paths = []
         album_captions = []
         album_size = 0
-        VIDEO_ALBUM_MAX_SIZE = 20 * 1024 * 1024   # 20 MB max per video in album
         PHOTO_ALBUM_MAX_SIZE = 100 * 1024 * 1024  # 100 MB max per photo in album
-        TOTAL_ALBUM_MAX_SIZE = 200 * 1024 * 1024  # 200 MB max combined batch (Full 10 x 20MB)
+        TOTAL_ALBUM_MAX_SIZE = 200 * 1024 * 1024  # 200 MB max combined batch
         ALBUM_MAX_ITEMS = 10
 
         async def flush_album():
@@ -959,11 +958,6 @@ async def stream_and_upload_nodes(
 
             last_album_edit = 0.0
             album_count = len(album_paths)
-            item_label = "items"
-            if all(is_photo_file(p) for p in album_paths):
-                item_label = "photos"
-            elif all(is_video_file(p) for p in album_paths):
-                item_label = "videos"
 
             async def album_item_progress(item_idx: int, total_items: int, curr: int, tot: int, spd: float, item_name: str):
                 nonlocal last_album_edit
@@ -984,7 +978,7 @@ async def stream_and_upload_nodes(
 
             try:
                 await status_msg.edit(
-                    f"📤 **Uploading Album ({album_count} {item_label}) to Telegram...**\n"
+                    f"📤 **Uploading Photo Album ({album_count} photos) to Telegram...**\n"
                     f"⚡ *Pre-uploading with 16 parallel workers...*",
                     buttons=make_stop_btn(user_id),
                 )
@@ -997,15 +991,37 @@ async def stream_and_upload_nodes(
                 )
                 if config.PRIVATE_CHAT_ID and msgs:
                     await event.client.forward_messages(event.chat_id, msgs)
-            except Exception as e:
-                logger.error(f"Album upload failed: {e}", exc_info=True)
 
-            for p in album_paths:
-                try:
-                    if p.exists():
-                        p.unlink()
-                except Exception:
-                    pass
+                for p in album_paths:
+                    try:
+                        if p.exists():
+                            p.unlink()
+                    except Exception:
+                        pass
+            except Exception as e:
+                logger.error(f"Album upload failed: {e}. Falling back to standalone uploads...", exc_info=True)
+                for p, cap in zip(album_paths, album_captions):
+                    if not p.exists():
+                        continue
+                    try:
+                        sent = await uploader.upload_media(
+                            chat_id=target_chat_id,
+                            file_path=p,
+                            caption=cap,
+                            progress_callback=None,
+                            workers=16,
+                        )
+                        if config.PRIVATE_CHAT_ID and sent:
+                            await event.client.forward_messages(event.chat_id, sent)
+                    except Exception as fallback_err:
+                        logger.error(f"Fallback upload failed for {p.name}: {fallback_err}")
+                    finally:
+                        try:
+                            if p.exists():
+                                p.unlink()
+                        except Exception:
+                            pass
+
             album_paths.clear()
             album_captions.clear()
             album_size = 0
@@ -1072,36 +1088,31 @@ async def stream_and_upload_nodes(
                 is_photo = is_photo_file(dest_path)
                 is_video = is_video_file(dest_path)
 
-                # Smart Album Eligibility:
-                # - Photos <= 100MB
-                # - Videos <= 20MB (Short clips)
-                # (Videos > 20MB & non-media files always standalone!)
+                # Photo Album Eligibility (Only photos are grouped into albums; all videos & docs upload standalone!)
                 can_be_album_item = (
                     is_multi_file
-                    and (
-                        (is_photo and actual_size <= PHOTO_ALBUM_MAX_SIZE)
-                        or (is_video and actual_size <= VIDEO_ALBUM_MAX_SIZE)
-                    )
+                    and is_photo
+                    and actual_size <= PHOTO_ALBUM_MAX_SIZE
                 )
 
                 if can_be_album_item:
                     if album_size + actual_size > TOTAL_ALBUM_MAX_SIZE or len(album_paths) >= ALBUM_MAX_ITEMS:
                         await flush_album()
                     album_paths.append(dest_path)
-                    icon = "🎬" if is_video else "🖼️"
-                    album_captions.append(f"{icon} **{dest_path.name}**\n☁️ `Mega.nz` • `{folder_name}`")
+                    album_captions.append(f"🖼️ **{dest_path.name}**\n☁️ `Mega.nz` • `{folder_name}`")
                     album_size += actual_size
                     continue
 
-                # Standalone media upload (Videos > 20MB, Documents, Archives, or Single Files)
+                # Standalone media upload (All Videos, Documents, Archives, or Single Files)
                 await flush_album()
 
                 thumb_path = None
                 if is_video_file(dest_path):
                     try:
                         meta = get_video_metadata(dest_path)
-                        if meta and meta.get("duration", 0) > 0:
-                            thumb_path = await generate_video_thumbnail(dest_path, meta["duration"])
+                        dur = meta.get("duration", 0) if meta else 0
+                        thumb_ts = max(1, dur // 10) if dur > 0 else 1
+                        thumb_path = generate_video_thumbnail(dest_path, timestamp_sec=thumb_ts)
                     except Exception as thumb_err:
                         logger.warning(f"Failed thumbnail for {dest_path.name}: {thumb_err}")
 

@@ -292,46 +292,7 @@ class TelethonUploader:
                 max_retries=max_retries,
             )
 
-            if is_video_file(fp):
-                meta = get_video_metadata(fp)
-                dur = meta.get("duration", 0)
-                w = meta.get("width", 0)
-                h = meta.get("height", 0)
-
-                attrs = [
-                    DocumentAttributeVideo(
-                        duration=dur,
-                        w=w,
-                        h=h,
-                        supports_streaming=True,
-                    ),
-                    types.DocumentAttributeFilename(file_name=fp.name),
-                ]
-
-                thumb_input = None
-                thumb_path = generate_video_thumbnail(fp, max(1, dur // 10) if dur > 0 else 1)
-                if thumb_path and thumb_path.exists():
-                    try:
-                        thumb_input = await self.client.upload_file(str(thumb_path))
-                    except Exception:
-                        pass
-                    finally:
-                        try:
-                            thumb_path.unlink()
-                        except Exception:
-                            pass
-
-                uploaded_inputs.append(
-                    types.InputMediaUploadedDocument(
-                        file=input_file,
-                        mime_type="video/mp4",
-                        attributes=attrs,
-                        thumb=thumb_input,
-                        supports_streaming=True,
-                    )
-                )
-            else:
-                uploaded_inputs.append(input_file)
+            uploaded_inputs.append(input_file)
 
         if not uploaded_inputs:
             return None

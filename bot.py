@@ -479,9 +479,8 @@ async def process_terabox_link(
         album_paths = []
         album_captions = []
         album_size = 0
-        VIDEO_ALBUM_MAX_SIZE = 20 * 1024 * 1024   # 20 MB max per video in album
         PHOTO_ALBUM_MAX_SIZE = 100 * 1024 * 1024  # 100 MB max per photo in album
-        TOTAL_ALBUM_MAX_SIZE = 200 * 1024 * 1024  # 200 MB max combined batch (Full 10 x 20MB)
+        TOTAL_ALBUM_MAX_SIZE = 200 * 1024 * 1024  # 200 MB max combined batch
         ALBUM_MAX_ITEMS = 10
 
         async def flush_album():
@@ -491,11 +490,6 @@ async def process_terabox_link(
 
             last_album_edit = 0.0
             album_count = len(album_paths)
-            item_label = "items"
-            if all(is_photo_file(p) for p in album_paths):
-                item_label = "photos"
-            elif all(is_video_file(p) for p in album_paths):
-                item_label = "videos"
 
             async def album_item_progress(item_idx: int, total_items: int, curr: int, tot: int, spd: float, item_name: str):
                 nonlocal last_album_edit
@@ -516,7 +510,7 @@ async def process_terabox_link(
 
             try:
                 await status_msg.edit(
-                    f"📤 **Uploading Album ({album_count} {item_label}) to Telegram...**\n"
+                    f"📤 **Uploading Photo Album ({album_count} photos) to Telegram...**\n"
                     f"⚡ *Pre-uploading with 16 parallel workers...*",
                     buttons=make_stop_btn(user_id),
                 )
@@ -529,14 +523,35 @@ async def process_terabox_link(
                 )
                 if config.PRIVATE_CHAT_ID and msgs:
                     await client.forward_messages(event.chat_id, msgs)
-            except Exception as e:
-                logger.error(f"Album upload failed: {e}", exc_info=True)
 
-            for p in album_paths:
-                try:
-                    if p.exists(): p.unlink()
-                except:
-                    pass
+                for p in album_paths:
+                    try:
+                        if p.exists(): p.unlink()
+                    except:
+                        pass
+            except Exception as e:
+                logger.error(f"Album upload failed: {e}. Falling back to standalone uploads...", exc_info=True)
+                for p, cap in zip(album_paths, album_captions):
+                    if not p.exists():
+                        continue
+                    try:
+                        sent = await uploader.upload_media(
+                            chat_id=target_chat_id,
+                            file_path=p,
+                            caption=cap,
+                            progress_callback=None,
+                            workers=16,
+                        )
+                        if config.PRIVATE_CHAT_ID and sent:
+                            await client.forward_messages(event.chat_id, sent)
+                    except Exception as fallback_err:
+                        logger.error(f"Fallback upload failed for {p.name}: {fallback_err}")
+                    finally:
+                        try:
+                            if p.exists(): p.unlink()
+                        except:
+                            pass
+
             album_paths.clear()
             album_captions.clear()
             album_size = 0
@@ -564,16 +579,11 @@ async def process_terabox_link(
             is_photo = is_photo_file(file_path_obj)
             is_video = is_video_file(file_path_obj)
 
-            # Smart Album Eligibility:
-            # - Photos <= 100MB
-            # - Videos <= 20MB (Short clips)
-            # (Videos > 20MB & non-media files always standalone!)
+            # Photo Album Eligibility (Only photos are grouped into albums; all videos & docs upload standalone!)
             can_be_album_item = (
                 is_multi_file
-                and (
-                    (is_photo and file_obj.size <= PHOTO_ALBUM_MAX_SIZE)
-                    or (is_video and file_obj.size <= VIDEO_ALBUM_MAX_SIZE)
-                )
+                and is_photo
+                and file_obj.size <= PHOTO_ALBUM_MAX_SIZE
             )
 
             if not can_be_album_item:
@@ -636,7 +646,7 @@ async def process_terabox_link(
                     if downloaded_file.exists(): downloaded_file.unlink()
                 continue
 
-            # If Small File (Photo or Video <= 20MB) -> ALBUM LOGIC
+            # If Photo Album item -> ALBUM LOGIC
             if album_size + file_obj.size > TOTAL_ALBUM_MAX_SIZE or len(album_paths) >= ALBUM_MAX_ITEMS:
                 await flush_album()
 
@@ -652,7 +662,7 @@ async def process_terabox_link(
                     except Exception:
                         pass
 
-            # Download small file
+            # Download small photo
             downloader = TeraBoxDownloader(connections=config.DOWNLOAD_STREAMS)
             try:
                 downloaded_file = await downloader.download_file(
@@ -660,8 +670,7 @@ async def process_terabox_link(
                     expected_size=file_obj.size, progress_callback=download_progress_album
                 )
                 album_paths.append(downloaded_file)
-                icon = "🎬" if is_video else "🖼️"
-                album_captions.append(f"{icon} **{file_obj.file_name}**")
+                album_captions.append(f"🖼️ **{file_obj.file_name}**")
                 album_size += file_obj.size
             except DownloadError as e:
                 await event.reply(f"❌ {file_prefix}**Download Failed**: {str(e)}")
