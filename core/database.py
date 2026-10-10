@@ -35,9 +35,14 @@ class Database:
             await db.execute("""
                 CREATE TABLE IF NOT EXISTS user_settings (
                     user_id INTEGER PRIMARY KEY,
-                    filter_mode TEXT DEFAULT 'all'
+                    filter_mode TEXT DEFAULT 'all',
+                    delivery_mode TEXT DEFAULT 'both'
                 )
             """)
+            try:
+                await db.execute("ALTER TABLE user_settings ADD COLUMN delivery_mode TEXT DEFAULT 'both'")
+            except Exception:
+                pass
             await db.commit()
         logger.info(f"Database initialized at {self.db_path}")
 
@@ -115,6 +120,34 @@ class Database:
                 ON CONFLICT(user_id) DO UPDATE SET filter_mode = excluded.filter_mode
                 """,
                 (user_id, filter_mode),
+            )
+            await db.commit()
+
+    async def get_user_delivery_mode(self, user_id: int) -> str:
+        """Get user's delivery mode ('both' or 'channel'). Default is 'both' (Mode B)."""
+        async with aiosqlite.connect(self.db_path) as db:
+            async with db.execute(
+                "SELECT delivery_mode FROM user_settings WHERE user_id = ?",
+                (user_id,),
+            ) as cursor:
+                row = await cursor.fetchone()
+                if row and row[0]:
+                    return str(row[0]).lower()
+        return "both"
+
+    async def set_user_delivery_mode(self, user_id: int, delivery_mode: str):
+        """Set user's delivery mode ('both' or 'channel')."""
+        delivery_mode = delivery_mode.lower()
+        if delivery_mode not in ["both", "channel"]:
+            delivery_mode = "both"
+        async with aiosqlite.connect(self.db_path) as db:
+            await db.execute(
+                """
+                INSERT INTO user_settings (user_id, delivery_mode)
+                VALUES (?, ?)
+                ON CONFLICT(user_id) DO UPDATE SET delivery_mode = excluded.delivery_mode
+                """,
+                (user_id, delivery_mode),
             )
             await db.commit()
 

@@ -155,6 +155,7 @@ async def handle_help(event: events.NewMessage.Event):
         "📖 **TeraBox Bot Commands & Usage**\n\n"
         "• `/start` - Start the bot & view system status\n"
         "• `/filter [video|photo|all]` - Filter files in folders\n"
+        "• `/delivery [both|channel]` - Delivery mode (Both DM+Channel or Channel only)\n"
         "• `/stop` or `/cancel` - Abort active download/upload\n"
         "• `/ping` - Check bot responsiveness & latency\n"
         "• `/help` - Show this help menu\n"
@@ -248,6 +249,49 @@ async def handle_filter(event: events.NewMessage.Event):
             "💡 **Inline Shortcut:**\n"
             "You can also attach it directly with any link:\n"
             "`<terabox_link> video` or `<terabox_link> photo` or `<terabox_link> other`"
+        )
+
+
+@client.on(events.NewMessage(pattern=r"^/delivery(?:\s+(.*))?$", incoming=True, func=lambda e: not e.out))
+async def handle_delivery(event: events.NewMessage.Event):
+    if not event.is_private:
+        return
+    sender = await event.get_sender()
+    if not sender or getattr(sender, "bot", False):
+        return
+    user_id = event.sender_id
+    if not is_allowed_user(user_id):
+        return
+
+    arg = (event.pattern_match.group(1) or "").strip().lower()
+
+    if arg in ["both", "dm", "default"]:
+        await db.set_user_delivery_mode(user_id, "both")
+        await event.reply(
+            "📬 **Delivery Mode: Both (Channel + Bot DM)** [Active]\n\n"
+            "• Naye files aapke **Storage Channel** mein save honge\n"
+            "• Naye files **is bot chat mein bhi forward** honge\n"
+            "• Storage mein pehle se maujood files direct **silently skip** honge (no spam!)\n\n"
+            "💡 _Agar bot chat ko silent rakhna ho (Vault Mode), use karein:_ `/delivery channel`"
+        )
+    elif arg in ["channel", "vault", "silent", "channel_only"]:
+        await db.set_user_delivery_mode(user_id, "channel")
+        await event.reply(
+            "🛡️ **Delivery Mode: Storage Channel Only (Vault Mode)** [Active]\n\n"
+            "• Naye files **sirf Storage Channel** mein save honge\n"
+            "• Bot chat bilkul silent rahegi (koi media forward nahi hoga)\n"
+            "• Kaam khatam hone par yahan sirf **Final Summary Card** aayegi!\n\n"
+            "💡 _Dono jagah pane ke liye wapas switch karein:_ `/delivery both`"
+        )
+    else:
+        current = await db.get_user_delivery_mode(user_id)
+        current_label = "📬 Both (Channel + Bot DM) [Default]" if current == "both" else "🛡️ Storage Channel Only (Vault Mode)"
+        await event.reply(
+            f"📦 **Current Delivery Mode**: `{current_label}`\n\n"
+            "**Options:**\n"
+            "• `/delivery both` - Channel mein save karo **aur** bot DM mein bhi bhejo (Mode B)\n"
+            "• `/delivery channel` - Sirf Channel mein save karo (Bot DM silent, sirf summary card)\n\n"
+            "💡 _Storage mein pehle se maujood files hamesha silently skip hoti hain taaki duplicate spam na ho._"
         )
 
 
@@ -528,6 +572,12 @@ async def process_terabox_link(
             )
             await asyncio.sleep(1.5)
         target_chat_id = config.PRIVATE_CHAT_ID if config.PRIVATE_CHAT_ID else event.chat_id
+        delivery_mode = await db.get_user_delivery_mode(user_id)
+        uploaded_count = 0
+        uploaded_size = 0
+        skipped_count = 0
+        skipped_size = 0
+
         album_paths = []
         album_captions = []
         album_keys = []
@@ -538,7 +588,7 @@ async def process_terabox_link(
         ALBUM_MAX_ITEMS = 10
 
         async def flush_album():
-            nonlocal album_paths, album_captions, album_keys, album_size
+            nonlocal album_paths, album_captions, album_keys, album_size, uploaded_count, uploaded_size
             if not album_paths:
                 return
 
@@ -582,7 +632,7 @@ async def process_terabox_link(
                     progress_callback=album_item_progress,
                     workers=10,
                 )
-                if config.PRIVATE_CHAT_ID and msgs:
+                if config.PRIVATE_CHAT_ID and msgs and delivery_mode == "both":
                     await client.forward_messages(event.chat_id, msgs)
 
                 # Save cache for album items
@@ -592,6 +642,8 @@ async def process_terabox_link(
                             try:
                                 sz = p.stat().st_size if p.exists() else 0
                                 await db.save_cached_file(k, p.name, sz, target_chat_id, m.id)
+                                uploaded_count += 1
+                                uploaded_size += sz
                             except Exception:
                                 pass
 
@@ -606,6 +658,7 @@ async def process_terabox_link(
                     if not p.exists():
                         continue
                     try:
+                        sz = p.stat().st_size if p.exists() else 0
                         sent = await uploader.upload_media(
                             chat_id=target_chat_id,
                             file_path=p,
@@ -613,10 +666,12 @@ async def process_terabox_link(
                             progress_callback=None,
                             workers=10,
                         )
-                        if config.PRIVATE_CHAT_ID and sent:
+                        if config.PRIVATE_CHAT_ID and sent and delivery_mode == "both":
                             await client.forward_messages(event.chat_id, sent)
                         if sent and k:
-                            await db.save_cached_file(k, p.name, p.stat().st_size, target_chat_id, sent.id)
+                            await db.save_cached_file(k, p.name, sz, target_chat_id, sent.id)
+                            uploaded_count += 1
+                            uploaded_size += sz
                     except Exception as fallback_err:
                         logger.error(f"Fallback upload failed for {p.name}: {fallback_err}")
                     finally:
@@ -651,27 +706,24 @@ async def process_terabox_link(
 
             file_key = f"tb_{file_obj.fs_id}" if getattr(file_obj, "fs_id", None) else f"tb_{abs(hash(file_obj.file_name + str(file_obj.size)))}"
 
-            # Storage Channel / DB cache check: If already in channel, forward instantly!
+            # Storage Channel / DB cache check: SILENT SKIP IF ALREADY IN STORAGE!
             cached_msg = await db.find_cached_media(
                 client, config.PRIVATE_CHAT_ID, file_key, file_name=file_obj.file_name, file_size=file_obj.size
             )
             if cached_msg:
-                logger.info(f"Storage cache hit for TeraBox file {file_obj.file_name}! Forwarding...")
-                await flush_album()
+                logger.info(f"Storage cache hit for TeraBox file {file_obj.file_name}! Silently skipping...")
+                skipped_count += 1
+                skipped_size += file_obj.size
+                skip_msg = (
+                    f"⚡ {file_prefix}**Skipped (Already in Storage)**\n\n"
+                    f"🎬 `{file_obj.file_name}`\n"
+                    f"⏩ File pehle se storage channel mein hai — direct skip!"
+                )
                 try:
-                    await client.forward_messages(event.chat_id, cached_msg)
-                    await status_msg.edit(
-                        f"⚡ {file_prefix}**Found in Storage Channel!**\n\n"
-                        f"🎬 `{file_obj.file_name}`\n"
-                        f"⏩ Forwarded instantly to your chat without re-downloading!",
-                        buttons=make_stop_btn(user_id),
-                    )
-                    await asyncio.sleep(0.8)
-                except Exception as fwd_err:
-                    logger.warning(f"Forward failed ({fwd_err}), proceeding to download...")
-                    cached_msg = None
-                if cached_msg:
-                    continue
+                    await status_msg.edit(skip_msg, buttons=make_stop_btn(user_id))
+                except Exception:
+                    pass
+                continue
 
             file_path_obj = Path(file_obj.file_name)
             is_photo = is_photo_file(file_path_obj)
@@ -744,9 +796,11 @@ async def process_terabox_link(
                         workers=10,
                     )
                     if sent_msg:
-                        if config.PRIVATE_CHAT_ID:
+                        if config.PRIVATE_CHAT_ID and delivery_mode == "both":
                             await client.forward_messages(event.chat_id, sent_msg)
                         await db.save_cached_file(file_key, file_obj.file_name, file_obj.size, target_chat_id, sent_msg.id)
+                        uploaded_count += 1
+                        uploaded_size += file_obj.size
                 except Exception as up_err:
                     await event.reply(f"❌ {file_prefix}**Upload Failed**\n\n{str(up_err)}")
                 finally:
@@ -795,6 +849,25 @@ async def process_terabox_link(
                 await status_msg.delete()
             except Exception:
                 pass
+
+        mode_label = "📬 Channel + Bot DM" if delivery_mode == "both" else "🛡️ Storage Channel Only (Vault Mode)"
+        if is_multi_file or skipped_count > 0:
+            summary_lines = [
+                "🎉 **TeraBox Transfer Complete!**\n",
+                f"📤 **Newly Uploaded**: `{uploaded_count} file(s)` ({format_bytes(uploaded_size)})",
+            ]
+            if skipped_count > 0:
+                summary_lines.append(f"⏩ **Skipped (Already in Storage)**: `{skipped_count} file(s)` ({format_bytes(skipped_size)})")
+            summary_lines.append(f"📊 **Total Handled**: `{total_files} file(s)`")
+            if config.PRIVATE_CHAT_ID:
+                summary_lines.append(f"⚙️ **Delivery Mode**: `{mode_label}`")
+            await event.reply("\n".join(summary_lines))
+        elif total_files == 1 and skipped_count == 1:
+            await event.reply(
+                "⚡ **File Already in Storage!**\n\n"
+                f"🎬 `{files[0].file_name}` (`{files[0].size_readable}`)\n\n"
+                "💡 _Ye file aapke storage channel mein pehle se maujood hai, isliye re-download skip kar diya gaya!_"
+            )
 
     except Exception as e:
         logger.error(f"Pipeline error: {e}", exc_info=True)

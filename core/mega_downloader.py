@@ -7,6 +7,7 @@ import shutil
 import struct
 import time
 import uuid
+from collections import OrderedDict
 from pathlib import Path
 from typing import Optional, Tuple
 
@@ -347,12 +348,16 @@ async def inspect_mega_folder(url: str) -> Optional[dict]:
                 parent_h = node.get("p")
                 top_sf_h = dir_to_top_folder.get(parent_h)
                 if top_sf_h and top_sf_h in dirs:
+                    sub_name = dirs[top_sf_h]["name"]
+                    item["folder_name"] = sub_name
                     if ext in VIDEO_EXTENSIONS:
                         dirs[top_sf_h]["videos"].append(item)
                     elif ext in IMAGE_EXTENSIONS:
                         dirs[top_sf_h]["photos"].append(item)
                     else:
                         dirs[top_sf_h]["others"].append(item)
+                else:
+                    item["folder_name"] = "Main Folder"
 
             except Exception:
                 continue
@@ -920,25 +925,47 @@ async def stream_and_upload_nodes(
     filter_mode: str,
     sess_id: Optional[str] = None,
 ):
-    """Stream download selected nodes directly from Mega and upload to Telegram."""
-    # Sort files smallest first for quickest initial delivery
-    selected_nodes = sorted(selected_nodes, key=lambda n: n.get("size", 0))
+    """
+    Stream download selected nodes directly from Mega and upload to Telegram.
+    Processes folders sequentially (Folder-by-Folder) and silently skips cached files.
+    """
     total_selected = len(selected_nodes)
-    total_selected_size = sum(n["size"] for n in selected_nodes)
+    total_selected_size = sum(n.get("size", 0) for n in selected_nodes)
     is_multi_file = total_selected > 1
+
+    # Group selected nodes by subfolder (preserves folder hierarchy)
+    folder_groups = OrderedDict()
+    for node in selected_nodes:
+        fn = node.get("folder_name") or folder_name or "Main Folder"
+        if fn not in folder_groups:
+            folder_groups[fn] = []
+        folder_groups[fn].append(node)
+
+    total_folders = len(folder_groups)
+    delivery_mode = await db.get_user_delivery_mode(user_id)
 
     safe_id = f"{int(time.time())}_{user_id}"
     local_dir = config.DOWNLOAD_DIR / f"mega_{safe_id}"
     local_dir.mkdir(parents=True, exist_ok=True)
     stop_monitor = asyncio.Event()
 
+    # Transfer statistics
+    uploaded_count = 0
+    uploaded_size = 0
+    skipped_count = 0
+    skipped_size = 0
+
     try:
         filter_label = filter_mode.upper()
+        folder_overview = f"📂 **Target**: `{folder_name}` [{filter_label} ONLY]"
+        if total_folders > 1:
+            folder_overview += f"\n📁 **Folders**: `{total_folders}` (Sequential Folder-by-Folder)"
+
         await status_msg.edit(
             f"🚀 **Starting Mega Download...**\n"
-            f"📂 **Target**: `{folder_name}` [{filter_label} ONLY]\n"
+            f"{folder_overview}\n"
             f"📦 **Selected**: `{total_selected} Files` • `{format_bytes(total_selected_size)}`\n"
-            "⏳ *Downloading selected files directly (smallest first)...*",
+            "⏳ *Processing folder-by-folder with high-speed direct streaming...*",
             buttons=make_stop_btn(user_id),
         )
         await asyncio.sleep(1.0)
@@ -955,7 +982,7 @@ async def stream_and_upload_nodes(
         ALBUM_MAX_ITEMS = 10
 
         async def flush_album():
-            nonlocal album_paths, album_captions, album_keys, album_size
+            nonlocal album_paths, album_captions, album_keys, album_size, uploaded_count, uploaded_size
             if not album_paths:
                 return
 
@@ -999,7 +1026,8 @@ async def stream_and_upload_nodes(
                     progress_callback=album_item_progress,
                     workers=10,
                 )
-                if config.PRIVATE_CHAT_ID and msgs:
+                # Mode B: Forward to user DM if target is storage channel and user wants DM delivery
+                if config.PRIVATE_CHAT_ID and msgs and delivery_mode == "both":
                     await event.client.forward_messages(event.chat_id, msgs)
 
                 # Save cache records for each uploaded album item
@@ -1009,6 +1037,8 @@ async def stream_and_upload_nodes(
                             try:
                                 sz = p.stat().st_size if p.exists() else 0
                                 await db.save_cached_file(k, p.name, sz, target_chat_id, m.id)
+                                uploaded_count += 1
+                                uploaded_size += sz
                             except Exception:
                                 pass
 
@@ -1025,6 +1055,7 @@ async def stream_and_upload_nodes(
                     if not p.exists():
                         continue
                     try:
+                        sz = p.stat().st_size if p.exists() else 0
                         sent = await uploader.upload_media(
                             chat_id=target_chat_id,
                             file_path=p,
@@ -1032,10 +1063,12 @@ async def stream_and_upload_nodes(
                             progress_callback=None,
                             workers=10,
                         )
-                        if config.PRIVATE_CHAT_ID and sent:
+                        if config.PRIVATE_CHAT_ID and sent and delivery_mode == "both":
                             await event.client.forward_messages(event.chat_id, sent)
                         if sent and k:
-                            await db.save_cached_file(k, p.name, p.stat().st_size, target_chat_id, sent.id)
+                            await db.save_cached_file(k, p.name, sz, target_chat_id, sent.id)
+                            uploaded_count += 1
+                            uploaded_size += sz
                     except Exception as fallback_err:
                         logger.error(f"Fallback upload failed for {p.name}: {fallback_err}")
                     finally:
@@ -1052,188 +1085,217 @@ async def stream_and_upload_nodes(
 
         timeout = aiohttp.ClientTimeout(total=None, connect=60, sock_read=60)
         async with aiohttp.ClientSession(timeout=timeout) as dl_session:
-            for idx, node in enumerate(selected_nodes, start=1):
+            global_file_counter = 0
+
+            # FOLDER-BY-FOLDER SEQUENTIAL LOOP
+            for folder_idx, (curr_folder_name, folder_nodes) in enumerate(folder_groups.items(), start=1):
                 if stop_monitor.is_set():
                     break
 
-                file_size = node["size"]
-                file_name = sanitize_filename(node["name"])
-                file_prefix = f"[{idx}/{total_selected}] " if is_multi_file else ""
+                folder_file_count = len(folder_nodes)
+                folder_total_size = sum(n.get("size", 0) for n in folder_nodes)
 
-                # Telegram 2GB limit check
-                max_size_bytes = config.MAX_FILE_SIZE_MB * 1024 * 1024
-                if file_size > max_size_bytes:
-                    await flush_album()
-                    await event.reply(
-                        f"📄 **{file_name}**\n\n"
-                        f"💾 **Size**: {format_bytes(file_size)}\n"
-                        f"🛑 **Direct Bot Upload Limit**: {config.MAX_FILE_SIZE_MB} MB\n\n"
-                        f"⚠️ Exceeds Telegram's 2000 MB bot limit and was skipped."
-                    )
-                    continue
+                # Sort smallest first within THIS specific folder
+                folder_nodes = sorted(folder_nodes, key=lambda n: n.get("size", 0))
 
-                file_key = f"mg_{node['h']}"
-
-                # Storage Channel / DB cache check: If already in channel, forward instantly!
-                cached_msg = await db.find_cached_media(
-                    event.client, config.PRIVATE_CHAT_ID, file_key, file_name=file_name, file_size=file_size
+                folder_header = (
+                    f"📁 **Folder [{folder_idx}/{total_folders}]**: `{curr_folder_name}` "
+                    f"({folder_file_count} files, {format_bytes(folder_total_size)})\n"
+                    if total_folders > 1 else ""
                 )
-                if cached_msg:
-                    logger.info(f"Storage cache hit for Mega node {node['h']} ({file_name})! Forwarding...")
-                    await flush_album()
-                    try:
-                        await event.client.forward_messages(event.chat_id, cached_msg)
-                        await status_msg.edit(
-                            f"⚡ {file_prefix}**Found in Storage Channel!**\n\n"
-                            f"🎬 `{file_name}`\n"
-                            f"⏩ Forwarded instantly to your chat without re-downloading!",
-                            buttons=make_stop_btn(user_id),
+
+                for file_idx, node in enumerate(folder_nodes, start=1):
+                    if stop_monitor.is_set():
+                        break
+
+                    global_file_counter += 1
+                    file_size = node["size"]
+                    file_name = sanitize_filename(node["name"])
+
+                    if total_folders > 1:
+                        file_prefix = f"[{file_idx}/{folder_file_count}] "
+                    else:
+                        file_prefix = f"[{global_file_counter}/{total_selected}] " if is_multi_file else ""
+
+                    # Telegram 2GB limit check
+                    max_size_bytes = config.MAX_FILE_SIZE_MB * 1024 * 1024
+                    if file_size > max_size_bytes:
+                        await flush_album()
+                        await event.reply(
+                            f"📄 **{file_name}**\n\n"
+                            f"📁 **Folder**: `{curr_folder_name}`\n"
+                            f"💾 **Size**: {format_bytes(file_size)}\n"
+                            f"🛑 **Direct Bot Upload Limit**: {config.MAX_FILE_SIZE_MB} MB\n\n"
+                            f"⚠️ Exceeds Telegram's 2000 MB bot limit and was skipped."
                         )
-                        await asyncio.sleep(0.8)
-                    except Exception as fwd_err:
-                        logger.warning(f"Forward failed ({fwd_err}), proceeding to download...")
-                        cached_msg = None
-                    if cached_msg:
                         continue
 
-                # Pre-download batch management:
-                node_ext = ("." + node["name"].split(".")[-1].lower()) if "." in node.get("name", "") else ""
-                node_is_photo = node_ext in IMAGE_EXTENSIONS
-                node_is_video = node_ext in VIDEO_EXTENSIONS
-                incoming_can_album = (
-                    is_multi_file
-                    and (
-                        (node_is_photo and file_size <= PHOTO_ALBUM_MAX_SIZE)
-                        or (node_is_video and file_size <= VIDEO_ALBUM_MAX_SIZE)
+                    file_key = f"mg_{node['h']}"
+
+                    # Storage Channel / DB cache check: SILENT SKIP IF ALREADY IN STORAGE!
+                    cached_msg = await db.find_cached_media(
+                        event.client, config.PRIVATE_CHAT_ID, file_key, file_name=file_name, file_size=file_size
                     )
-                )
-
-                # If this incoming file is standalone, flush any pending album batch first
-                if not incoming_can_album and album_paths:
-                    await flush_album()
-
-                # If album batch is already at 10 items or 200MB, upload that batch first before downloading this next file!
-                if incoming_can_album and (len(album_paths) >= ALBUM_MAX_ITEMS or album_size + file_size > TOTAL_ALBUM_MAX_SIZE):
-                    await flush_album()
-
-                dest_path = local_dir / file_name
-                if dest_path.exists():
-                    dest_path = local_dir / f"{dest_path.stem}_{node['h'][:4]}{dest_path.suffix}"
-
-                last_dl_edit = 0.0
-
-                async def dl_progress(current: int, total: int, speed: float):
-                    nonlocal last_dl_edit
-                    now = time.monotonic()
-                    if now - last_dl_edit >= 2.0 or current == total:
-                        last_dl_edit = now
-                        txt = render_mega_progress(
-                            action=f"📥 {file_prefix}Downloading from Mega",
-                            name=file_name,
-                            current=current,
-                            total=total,
-                            speed=speed,
+                    if cached_msg:
+                        logger.info(f"Storage cache hit for Mega node {node['h']} ({file_name})! Silently skipping...")
+                        skipped_count += 1
+                        skipped_size += file_size
+                        # Silent Skip: Do NOT forward to user's chat! Just update progress card.
+                        skip_txt = (
+                            f"{folder_header}"
+                            f"⚡ {file_prefix}**Skipped (Already in Storage)**\n\n"
+                            f"🎬 `{file_name}`\n"
+                            f"⏩ File pehle se storage channel mein hai — direct skip!"
                         )
                         try:
-                            await status_msg.edit(txt, buttons=make_stop_btn(user_id))
+                            await status_msg.edit(skip_txt, buttons=make_stop_btn(user_id))
                         except Exception:
                             pass
+                        continue
 
-                success = await download_mega_node_stream(
-                    session=dl_session,
-                    folder_id=folder_info["folder_id"],
-                    node=node,
-                    dest_path=dest_path,
-                    progress_callback=dl_progress,
-                    stop_event=stop_monitor,
-                )
-
-                if not success or not dest_path.exists():
-                    logger.warning(f"Skipping failed node download: {file_name}")
-                    continue
-
-                actual_size = dest_path.stat().st_size
-                is_photo = is_photo_file(dest_path)
-                is_video = is_video_file(dest_path)
-
-                # Album Eligibility: Photos <= 100MB, Videos <= 20MB
-                can_be_album_item = (
-                    is_multi_file
-                    and (
-                        (is_photo and actual_size <= PHOTO_ALBUM_MAX_SIZE)
-                        or (is_video and actual_size <= VIDEO_ALBUM_MAX_SIZE)
+                    # Pre-download batch management:
+                    node_ext = ("." + node["name"].split(".")[-1].lower()) if "." in node.get("name", "") else ""
+                    node_is_photo = node_ext in IMAGE_EXTENSIONS
+                    node_is_video = node_ext in VIDEO_EXTENSIONS
+                    incoming_can_album = (
+                        is_multi_file
+                        and (
+                            (node_is_photo and file_size <= PHOTO_ALBUM_MAX_SIZE)
+                            or (node_is_video and file_size <= VIDEO_ALBUM_MAX_SIZE)
+                        )
                     )
-                )
 
-                if can_be_album_item:
-                    album_paths.append(dest_path)
-                    album_keys.append(file_key)
-                    icon = "🎬" if is_video else "🖼️"
-                    album_captions.append(f"{icon} `{dest_path.name}` (`{format_bytes(actual_size)}`)\n`#{file_key}`")
-                    album_size += actual_size
-
-                    # If batch reached 10 items or 200MB, upload this completed batch immediately!
-                    if len(album_paths) >= ALBUM_MAX_ITEMS or album_size >= TOTAL_ALBUM_MAX_SIZE:
+                    # If this incoming file is standalone, flush any pending album batch first
+                    if not incoming_can_album and album_paths:
                         await flush_album()
-                    continue
 
-                # Standalone media upload (Videos > 20MB, Documents, Archives, or Single Files)
-                await flush_album()
+                    # If album batch is already at 10 items or 200MB, upload that batch first before downloading this next file!
+                    if incoming_can_album and (len(album_paths) >= ALBUM_MAX_ITEMS or album_size + file_size > TOTAL_ALBUM_MAX_SIZE):
+                        await flush_album()
 
-                thumb_path = None
-                if is_video_file(dest_path):
-                    try:
-                        meta = get_video_metadata(dest_path)
-                        dur = meta.get("duration", 0) if meta else 0
-                        thumb_ts = max(1, dur // 10) if dur > 0 else 1
-                        thumb_path = generate_video_thumbnail(dest_path, timestamp_sec=thumb_ts)
-                    except Exception as thumb_err:
-                        logger.warning(f"Failed thumbnail for {dest_path.name}: {thumb_err}")
+                    dest_path = local_dir / file_name
+                    if dest_path.exists():
+                        dest_path = local_dir / f"{dest_path.stem}_{node['h'][:4]}{dest_path.suffix}"
 
-                last_upload_edit = 0.0
+                    last_dl_edit = 0.0
 
-                async def upload_progress(current: int, total: int, speed: float):
-                    nonlocal last_upload_edit
-                    now = time.monotonic()
-                    if now - last_upload_edit >= 2.0 or current == total:
-                        last_upload_edit = now
-                        txt = render_mega_progress(
-                            action=f"📤 {file_prefix}Uploading to Telegram",
-                            name=dest_path.name,
-                            current=current,
-                            total=total,
-                            speed=speed,
+                    async def dl_progress(current: int, total: int, speed: float):
+                        nonlocal last_dl_edit
+                        now = time.monotonic()
+                        if now - last_dl_edit >= 2.0 or current == total:
+                            last_dl_edit = now
+                            txt = render_mega_progress(
+                                action=f"{folder_header}📥 {file_prefix}Downloading from Mega",
+                                name=file_name,
+                                current=current,
+                                total=total,
+                                speed=speed,
+                            )
+                            try:
+                                await status_msg.edit(txt, buttons=make_stop_btn(user_id))
+                            except Exception:
+                                pass
+
+                    success = await download_mega_node_stream(
+                        session=dl_session,
+                        folder_id=folder_info["folder_id"],
+                        node=node,
+                        dest_path=dest_path,
+                        progress_callback=dl_progress,
+                        stop_event=stop_monitor,
+                    )
+
+                    if not success or not dest_path.exists():
+                        logger.warning(f"Skipping failed node download: {file_name}")
+                        continue
+
+                    actual_size = dest_path.stat().st_size
+                    is_photo = is_photo_file(dest_path)
+                    is_video = is_video_file(dest_path)
+
+                    # Album Eligibility: Photos <= 100MB, Videos <= 20MB
+                    can_be_album_item = (
+                        is_multi_file
+                        and (
+                            (is_photo and actual_size <= PHOTO_ALBUM_MAX_SIZE)
+                            or (is_video and actual_size <= VIDEO_ALBUM_MAX_SIZE)
                         )
+                    )
+
+                    if can_be_album_item:
+                        album_paths.append(dest_path)
+                        album_keys.append(file_key)
+                        icon = "🎬" if is_video else "🖼️"
+                        album_captions.append(f"{icon} `{dest_path.name}` (`{format_bytes(actual_size)}`)\n`#{file_key}`")
+                        album_size += actual_size
+
+                        # If batch reached 10 items or 200MB, upload this completed batch immediately!
+                        if len(album_paths) >= ALBUM_MAX_ITEMS or album_size >= TOTAL_ALBUM_MAX_SIZE:
+                            await flush_album()
+                        continue
+
+                    # Standalone media upload (Videos > 20MB, Documents, Archives, or Single Files)
+                    await flush_album()
+
+                    thumb_path = None
+                    if is_video_file(dest_path):
                         try:
-                            await status_msg.edit(txt, buttons=make_stop_btn(user_id))
+                            meta = get_video_metadata(dest_path)
+                            dur = meta.get("duration", 0) if meta else 0
+                            thumb_ts = max(1, dur // 10) if dur > 0 else 1
+                            thumb_path = generate_video_thumbnail(dest_path, timestamp_sec=thumb_ts)
+                        except Exception as thumb_err:
+                            logger.warning(f"Failed thumbnail for {dest_path.name}: {thumb_err}")
+
+                    last_upload_edit = 0.0
+
+                    async def upload_progress(current: int, total: int, speed: float):
+                        nonlocal last_upload_edit
+                        now = time.monotonic()
+                        if now - last_upload_edit >= 2.0 or current == total:
+                            last_upload_edit = now
+                            txt = render_mega_progress(
+                                action=f"{folder_header}📤 {file_prefix}Uploading to Telegram",
+                                name=dest_path.name,
+                                current=current,
+                                total=total,
+                                speed=speed,
+                            )
+                            try:
+                                await status_msg.edit(txt, buttons=make_stop_btn(user_id))
+                            except Exception:
+                                pass
+
+                    caption = f"🎬 `{dest_path.name}` (`{format_bytes(actual_size)}`)\n`#{file_key}`"
+
+                    sent_msg = await uploader.upload_media(
+                        chat_id=target_chat_id,
+                        file_path=dest_path,
+                        caption=caption,
+                        thumb_path=thumb_path,
+                        progress_callback=upload_progress,
+                        workers=10,
+                    )
+
+                    if sent_msg:
+                        if config.PRIVATE_CHAT_ID and delivery_mode == "both":
+                            await event.client.forward_messages(event.chat_id, sent_msg)
+                        await db.save_cached_file(file_key, dest_path.name, actual_size, target_chat_id, sent_msg.id)
+                        uploaded_count += 1
+                        uploaded_size += actual_size
+
+                    if thumb_path and thumb_path.exists():
+                        try:
+                            thumb_path.unlink()
                         except Exception:
                             pass
-
-                caption = f"🎬 `{dest_path.name}` (`{format_bytes(actual_size)}`)\n`#{file_key}`"
-
-                sent_msg = await uploader.upload_media(
-                    chat_id=target_chat_id,
-                    file_path=dest_path,
-                    caption=caption,
-                    thumb_path=thumb_path,
-                    progress_callback=upload_progress,
-                    workers=10,
-                )
-
-                if sent_msg:
-                    if config.PRIVATE_CHAT_ID:
-                        await event.client.forward_messages(event.chat_id, sent_msg)
-                    await db.save_cached_file(file_key, dest_path.name, actual_size, target_chat_id, sent_msg.id)
-
-                if thumb_path and thumb_path.exists():
                     try:
-                        thumb_path.unlink()
+                        dest_path.unlink()
                     except Exception:
                         pass
-                try:
-                    dest_path.unlink()
-                except Exception:
-                    pass
+
+                # FLUSH ALBUM AT THE END OF THIS FOLDER (Prevents cross-folder mixing!)
+                await flush_album()
 
         # Flush any remaining album items
         await flush_album()
@@ -1250,14 +1312,27 @@ async def stream_and_upload_nodes(
                 [Button.inline("🔄 Download Another Folder from Same Link", data=f"m_reopen:{sess_id}")]
             ]
 
-        await event.reply(
-            f"✅ **Mega Transfer Complete!**\n\n"
-            f"📂 **Folder**: `{folder_name}`\n"
-            f"🎯 **Filter**: `{filter_mode.upper()} ONLY`\n"
-            f"📦 **Successfully Delivered**: `{total_selected} file(s)` ({format_bytes(total_selected_size)}).\n\n"
-            f"💡 _Aap is link se doosre subfolders bhi bina link dobara send kiye download kar sakte hain!_",
-            buttons=completion_buttons,
-        )
+        mode_label = "📬 Channel + Bot DM" if delivery_mode == "both" else "🛡️ Storage Channel Only (Vault Mode)"
+        summary_lines = [
+            "🎉 **Mega Transfer Complete!**\n",
+            f"📂 **Folder**: `{folder_name}`",
+            f"🎯 **Filter**: `{filter_mode.upper()} ONLY`",
+        ]
+        if total_folders > 1:
+            summary_lines.append(f"📁 **Folders Processed**: `{total_folders}` (Sequentially)")
+
+        summary_lines.extend([
+            f"📤 **Newly Uploaded**: `{uploaded_count} file(s)` ({format_bytes(uploaded_size)})",
+            f"⏩ **Skipped (Already in Storage)**: `{skipped_count} file(s)` ({format_bytes(skipped_size)})",
+            f"📊 **Total Handled**: `{total_selected} file(s)` ({format_bytes(total_selected_size)})",
+        ])
+
+        if config.PRIVATE_CHAT_ID:
+            summary_lines.append(f"⚙️ **Delivery Mode**: `{mode_label}`")
+
+        summary_lines.append("\n💡 _Aap is link se doosre subfolders bhi bina link dobara send kiye download kar sakte hain!_")
+
+        await event.reply("\n".join(summary_lines), buttons=completion_buttons)
 
     finally:
         stop_monitor.set()
@@ -1529,7 +1604,8 @@ async def process_mega_link(
                 workers=10,
             )
             if sent_msg:
-                if config.PRIVATE_CHAT_ID:
+                delivery_mode = await db.get_user_delivery_mode(user_id)
+                if config.PRIVATE_CHAT_ID and delivery_mode == "both":
                     await event.client.forward_messages(event.chat_id, sent_msg)
                 await db.save_cached_file(file_key, f.name, file_size, target_chat_id, sent_msg.id)
 
