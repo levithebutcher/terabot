@@ -920,6 +920,8 @@ async def stream_and_upload_nodes(
     sess_id: Optional[str] = None,
 ):
     """Stream download selected nodes directly from Mega and upload to Telegram."""
+    # Sort files smallest first for quickest initial delivery
+    selected_nodes = sorted(selected_nodes, key=lambda n: n.get("size", 0))
     total_selected = len(selected_nodes)
     total_selected_size = sum(n["size"] for n in selected_nodes)
     is_multi_file = total_selected > 1
@@ -935,7 +937,7 @@ async def stream_and_upload_nodes(
             f"🚀 **Starting Mega Download...**\n"
             f"📂 **Target**: `{folder_name}` [{filter_label} ONLY]\n"
             f"📦 **Selected**: `{total_selected} Files` • `{format_bytes(total_selected_size)}`\n"
-            "⏳ *Downloading selected files directly...*",
+            "⏳ *Downloading selected files directly (smallest first)...*",
             buttons=make_stop_btn(user_id),
         )
         await asyncio.sleep(1.0)
@@ -945,7 +947,9 @@ async def stream_and_upload_nodes(
         album_paths = []
         album_captions = []
         album_size = 0
-        ALBUM_MAX_SIZE = 100 * 1024 * 1024
+        VIDEO_ALBUM_MAX_SIZE = 20 * 1024 * 1024   # 20 MB max per video in album
+        PHOTO_ALBUM_MAX_SIZE = 100 * 1024 * 1024  # 100 MB max per photo in album
+        TOTAL_ALBUM_MAX_SIZE = 150 * 1024 * 1024  # 150 MB max combined batch
         ALBUM_MAX_ITEMS = 10
 
         async def flush_album():
@@ -955,6 +959,11 @@ async def stream_and_upload_nodes(
 
             last_album_edit = 0.0
             album_count = len(album_paths)
+            item_label = "items"
+            if all(is_photo_file(p) for p in album_paths):
+                item_label = "photos"
+            elif all(is_video_file(p) for p in album_paths):
+                item_label = "videos"
 
             async def album_item_progress(item_idx: int, total_items: int, curr: int, tot: int, spd: float, item_name: str):
                 nonlocal last_album_edit
@@ -962,7 +971,7 @@ async def stream_and_upload_nodes(
                 if now - last_album_edit >= 2.0 or curr == tot:
                     last_album_edit = now
                     txt = render_mega_progress(
-                        action=f"📤 Uploading Photo [{item_idx}/{total_items}]",
+                        action=f"📤 Uploading Album [{item_idx}/{total_items}]",
                         name=item_name,
                         current=curr,
                         total=tot,
@@ -975,7 +984,7 @@ async def stream_and_upload_nodes(
 
             try:
                 await status_msg.edit(
-                    f"📤 **Uploading Album ({album_count} photos) to Telegram...**\n"
+                    f"📤 **Uploading Album ({album_count} {item_label}) to Telegram...**\n"
                     f"⚡ *Pre-uploading with 16 parallel workers...*",
                     buttons=make_stop_btn(user_id),
                 )
@@ -1060,23 +1069,31 @@ async def stream_and_upload_nodes(
                     continue
 
                 actual_size = dest_path.stat().st_size
+                is_photo = is_photo_file(dest_path)
+                is_video = is_video_file(dest_path)
 
-                # Batch photos into smart albums (videos & documents always uploaded standalone)
+                # Smart Album Eligibility:
+                # - Photos <= 100MB
+                # - Videos <= 20MB (Short clips)
+                # (Videos > 20MB & non-media files always standalone!)
                 can_be_album_item = (
                     is_multi_file
-                    and actual_size < ALBUM_MAX_SIZE
-                    and is_photo_file(dest_path)
+                    and (
+                        (is_photo and actual_size <= PHOTO_ALBUM_MAX_SIZE)
+                        or (is_video and actual_size <= VIDEO_ALBUM_MAX_SIZE)
+                    )
                 )
 
                 if can_be_album_item:
-                    if album_size + actual_size > ALBUM_MAX_SIZE or len(album_paths) >= ALBUM_MAX_ITEMS:
+                    if album_size + actual_size > TOTAL_ALBUM_MAX_SIZE or len(album_paths) >= ALBUM_MAX_ITEMS:
                         await flush_album()
                     album_paths.append(dest_path)
-                    album_captions.append(f"🖼️ **{dest_path.name}**\n☁️ `Mega.nz` • `{folder_name}`")
+                    icon = "🎬" if is_video else "🖼️"
+                    album_captions.append(f"{icon} **{dest_path.name}**\n☁️ `Mega.nz` • `{folder_name}`")
                     album_size += actual_size
                     continue
 
-                # Standalone media upload (Videos, Documents, Archives, or Single Photos)
+                # Standalone media upload (Videos > 20MB, Documents, Archives, or Single Files)
                 await flush_album()
 
                 thumb_path = None
