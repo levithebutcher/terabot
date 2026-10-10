@@ -29,6 +29,7 @@ from core.resolver import (
 from core.uploader import TelethonUploader
 from core.mega_downloader import is_mega_url, process_mega_link
 from utils.helpers import extract_urls, format_bytes, format_duration
+from utils.jokes import can_send_joke, get_random_joke
 from utils.logger import logger
 
 # Initialize Telethon client with automatic reconnect & infinite retries
@@ -709,11 +710,6 @@ async def handle_incoming_message(event: events.NewMessage.Event):
     if event.raw_text.startswith("/"):
         return
 
-    urls = extract_urls(event.raw_text)
-    if not urls:
-        # Ignore normal chat messages to prevent any message ping-pong loops
-        return
-
     user_id = event.sender_id
     await db.record_user(user_id, getattr(sender, "username", ""), getattr(sender, "first_name", ""))
 
@@ -724,6 +720,22 @@ async def handle_incoming_message(event: events.NewMessage.Event):
             "This is a private personal TeraBox downloader bot.\n"
             "You are not authorized to download files with this bot."
         )
+        return
+
+    urls = extract_urls(event.raw_text)
+    if not urls:
+        # User sent normal chat banter without any link!
+        if can_send_joke(user_id):
+            joke = get_random_joke()
+            reply_text = (
+                f"😜 **Lo pehle ek mast joke suno:**\n\n"
+                f"{joke}\n\n"
+                f"💡 _Ab timepass band karo aur koi TeraBox ya Mega link drop karo download ke liye!_ 📥"
+            )
+            try:
+                await event.reply(reply_text)
+            except Exception:
+                pass
         return
 
     # Process first found URL
