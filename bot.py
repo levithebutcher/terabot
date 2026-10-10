@@ -727,6 +727,13 @@ async def handle_incoming_message(event: events.NewMessage.Event):
     # Process first found URL
     target_url = urls[0]
 
+    if "mega.nz" in target_url or "mega.co.nz" in target_url:
+        logger.info(f"Routing Mega link from user {user_id}: {target_url[:50]}...")
+        from core.mega_downloader import process_mega_link
+        task = asyncio.create_task(process_mega_link(event, target_url))
+        active_tasks[user_id] = task
+        return
+
     # Check for inline filter cues in the message text
     raw_lower = event.raw_text.lower()
     words = raw_lower.split()
