@@ -1,237 +1,168 @@
-# 🤖 TeraBot — TeraBox Downloader Telegram Bot
+# 🤖 TeraBot v3.0 — TeraBox & Mega.nz High-Speed Telegram Downloader
 
-A high-speed, personal TeraBox → Telegram downloader bot built with **Telethon** and **Python 3.10+**.
+[![Python 3.10+](https://img.shields.io/badge/python-3.10+-blue.svg)](https://www.python.org/downloads/)
+[![Telethon](https://img.shields.io/badge/Telethon-1.45+-orange.svg)](https://github.com/LonamiWebs/Telethon)
+[![Mega.nz](https://img.shields.io/badge/Mega.nz-AES--CTR-red.svg)](https://mega.nz/)
+[![Google Colab](https://img.shields.io/badge/Colab-v3.0%20Ready-yellow.svg)](https://colab.research.google.com/)
+[![License: MIT](https://img.shields.io/badge/License-MIT-green.svg)](LICENSE)
 
-- Native direct-link resolver (no dead third-party workers)
-- Parallel multi-stream Range download engine
-- Async queue, per-user rate limiting
-- SQLite cache (optional, requires a private channel)
-- Windows-native — runs with a simple `python bot.py`
-
----
-
-## 📋 Requirements
-
-| Tool | Version | Notes |
-|------|---------|-------|
-| Python | 3.10+ | Download from [python.org](https://python.org) |
-| ffmpeg / ffprobe | any | Optional but **strongly recommended** for video thumbnails and duration metadata. Download from [ffmpeg.org](https://ffmpeg.org/download.html) and add to your system `PATH`. |
+An asynchronous, high-performance Telegram bot that downloads files and folders from **Mega.nz** and **TeraBox** (plus 30+ mirror domains), processes them with **Zero-Bandwidth Deduplication**, and uploads them to your Telegram Storage Vault Channel and private DMs up to Telegram's 2000 MB (2 GB) MTProto limit.
 
 ---
 
-## 🚀 Windows Setup (step-by-step)
+## 🌟 What's New in v3.0
 
-### 1 — Clone / download the project
-
-```
-cd C:\Users\YourName\Desktop
-git clone <repo-url> terabot
-cd terabot
-```
-
-### 2 — Create and activate a virtual environment
-
-```powershell
-python -m venv .venv
-.venv\Scripts\Activate.ps1      # PowerShell
-# or
-.venv\Scripts\activate.bat       # CMD
-```
-
-### 3 — Install dependencies
-
-```powershell
-pip install -r requirements.txt
-```
-
-### 4 — Configure your `.env` file
-
-Copy the example and fill in your real values:
-
-```powershell
-Copy-Item .env.example .env
-notepad .env
-```
-
-See the **Configuration** section below for details on each variable.
-
-### 5 — Run the bot
-
-```powershell
-python bot.py
-```
-
-The bot will print its username and start listening. Press **Ctrl+C** to stop gracefully.
+- ⚡ **Zero-Bandwidth Upfront Deduplication**: Deep-scans your Storage Channel messages (`ensure_channel_synced`). Files already in the storage channel are **instantly skipped** before opening any stream connection—saving server bandwidth and avoiding rate limits.
+- 📁 **Mega Subfolder Explorer**: Interactive inline navigation for complex Mega directory trees with 6 folders per page, pagination (`⬅️ Previous` / `Next ➡️`), and search (`🔍 Search Subfolder`).
+- 🔄 **Sequential Folder-by-Folder Downloads**: Downloads multi-folder shares strictly folder-by-folder (smallest to largest), flushing albums at each folder boundary to prevent cross-folder mixing.
+- 🛡️ **Dual Delivery Modes (`/delivery`)**:
+  - `channel` (Vault Mode): Saves all media silently to your Storage Channel. DM receives only progress cards and completion receipts (zero spam).
+  - `both` (Dual Mode / Default): Saves to the Storage Channel AND forwards newly downloaded files to your bot DM. Cached files are skipped silently.
+- 🎬 **10-Item Telegram Album Batching**: Automatically groups videos ($\le 20\text{ MB}$) and photos ($\le 100\text{ MB}$) into 10-item Telegram media albums.
+- 🎯 **File Type Filtering (`/filter`)**: Select download filters on the fly (`/filter video`, `/filter photo`, `/filter other`, `/filter all`).
+- 📊 **Real-Time Progress & Direct Channel Button**: Live progress cards with transfer speeds and estimated time of arrival (ETA), finishing with a one-click button linking directly to the storage channel.
 
 ---
 
-## 🍪 How to Get Your TeraBox Cookie (`ndus`)
+## 🏗️ Architecture & Engines
 
-The `ndus` cookie is a long-lived session token that lets the bot fetch direct download links from TeraBox's private API.
-
-1. Log in to **[1024tera.com](https://www.1024tera.com)** in your browser (Chrome/Edge recommended).
-2. Open **DevTools** → `F12` → **Application** tab → **Cookies** → `https://www.1024tera.com`.
-3. Find the cookie named **`ndus`** and copy its **Value**.
-4. Also copy the **`browserid`** value (optional but helps avoid verification challenges).
-5. Paste into `.env` as:
-
-```
-TERABOX_COOKIE=ndus=YOUR_NDUS_VALUE_HERE; lang=en; browserid=YOUR_BROWSERID
-```
-
-> **Important:** Never share your `.env` file or commit it to git. The `.gitignore` excludes it.
->
-> The cookie expires when you log out or TeraBox invalidates the session. When that happens the bot will notify admin IDs with an `[ERR-COOKIE]` alert.
-
----
-
-## ⚙️ Configuration
-
-All configuration lives in `.env`. See `.env.example` for a template.
-
-| Variable | Required | Default | Description |
-|----------|----------|---------|-------------|
-| `BOT_TOKEN` | ✅ | — | Get from [@BotFather](https://t.me/BotFather) |
-| `API_ID` | ✅ | — | Get from [my.telegram.org](https://my.telegram.org/apps) |
-| `API_HASH` | ✅ | — | Get from [my.telegram.org](https://my.telegram.org/apps) |
-| `TERABOX_COOKIE` | ✅ | — | Your `ndus` browser cookie (see above) |
-| `ADMIN_IDS` | ✅ | — | Comma-separated Telegram user IDs for admins |
-| `ALLOWED_USERS` | — | Same as `ADMIN_IDS` | Extra users allowed to use the bot. Leave blank for admin-only. |
-| `PRIVATE_CHAT_ID` | — | disabled | Channel ID (e.g. `-1001234567890`) to store uploads for instant caching. Leave blank to disable. |
-| `DOWNLOAD_STREAMS` | — | `6` | Parallel HTTP Range connections per file (1–12). More = faster but may trigger throttling. |
-| `MAX_FILE_SIZE_MB` | — | `2000` | Files larger than this get a direct-download link instead of being uploaded. |
-| `MAX_CONCURRENT_DOWNLOADS` | — | `1` | How many downloads can run at once across all users. |
-| `USER_RATE_LIMIT_SECONDS` | — | `30` | Minimum seconds between requests per user. |
-| `FALLBACK_API_URL` | — | — | Optional URL of a fallback resolver API (e.g. a custom Cloudflare Worker). |
-| `FALLBACK_API_KEY` | — | — | Bearer token for the fallback API. |
-
----
-
-## 📁 Project Structure
-
-```
+```text
 terabot/
-├── bot.py                 # Main bot — handlers, pipeline, queue
-├── config.py              # All configuration from .env
+├── bot.py                       # Main Telegram dispatcher, commands & event callbacks
+├── config.py                    # Environment configuration loader (.env)
+├── requirements.txt             # Async dependencies (Telethon, aiosqlite, curl_cffi, etc.)
+├── terabot_v3_colab.ipynb       # Production Google Colab High-Speed notebook
 ├── core/
-│   ├── resolver.py        # TeraBox share-link → file list (native /share/list API)
-│   ├── downloader.py      # Parallel Range download engine
-│   ├── uploader.py        # Telethon upload with video attributes + progress
-│   ├── media.py           # ffprobe metadata + ffmpeg thumbnail
-│   ├── database.py        # Async SQLite: cache + user registry
-│   └── queue_manager.py   # Concurrency semaphore + per-user rate limiting
-├── utils/
-│   ├── helpers.py         # URL extraction, domain list, formatting helpers
-│   └── logger.py          # Rotating log (10 MB × 5 backups → logs/bot.log)
-├── test_resolver.py       # CLI tool: resolve + download without Telegram
-├── requirements.txt
-├── .env.example
-├── .gitignore
-└── README.md
+│   ├── database.py              # SQLite cache, channel deep-indexer & deduplication
+│   ├── mega_downloader.py       # Mega folder tree parser, AES-CTR streaming, explorer
+│   ├── downloader.py            # TeraBox parallel HTTP Range multi-stream downloader
+│   ├── uploader.py              # Telethon high-speed multi-worker parallel uploader
+│   ├── resolver.py              # TeraBox link resolver with curl_cffi TLS impersonation
+│   ├── media.py                 # FFmpeg/FFprobe thumbnail & video duration extraction
+│   └── queue_manager.py         # Concurrency slots & per-user rate-limiting
+└── utils/
+    ├── helpers.py               # URL regex extraction, domain matching, formatters
+    ├── logger.py                # Rotating file logger
+    └── jokes.py                 # Fun waiting notices
 ```
-
----
-
-## 🧪 CLI Test (no Telegram needed)
-
-Test the resolver and downloader directly:
-
-```powershell
-python test_resolver.py https://1024tera.com/s/YOURSHAREKEY
-```
-
-This prints the file list, downloads the first file, and (if ffprobe is available) verifies media integrity.
 
 ---
 
 ## 🤖 Bot Commands
 
-| Command | Access | Description |
-|---------|--------|-------------|
-| `/start` | Allowed users | Welcome message and bot status |
-| `/help` | Allowed users | Command list and supported domains |
-| `/ping` | Allowed users | Round-trip latency check |
-| `/broadcast <msg>` | Admins only | Send a message to all registered users |
-
-**To download**: just paste any TeraBox / TeraBoxApp / 1024tera link into the chat.
+| Command | Description | Permission |
+| :--- | :--- | :--- |
+| `/start` | Welcome card, active delivery mode, filter badges & usage guide | All allowed users |
+| `/delivery` | View or toggle delivery mode (`🛡️ Channel Only` or `📬 Channel + DM`) | All allowed users |
+| `/filter <mode>` | Change file download filter (`video`, `photo`, `other`, `all`) | All allowed users |
+| `/stop` | Abort your active download or upload task | All allowed users |
+| `/broadcast <msg>` | Broadcast an announcement message to all registered users | Admins only |
 
 ---
 
 ## 🌐 Supported Domains
 
-`terabox.com`, `teraboxapp.com`, `1024tera.com`, `4funbox.com`, `mirrobox.com`,
-`nephobox.com`, `freeterabox.com`, `momerybox.com`, `tibibox.com`, `gibibox.com`,
-`pebibox.com`, `dubox.com`, and all their subdomains and mirrors.
+- **Mega.nz**: `mega.nz`, `mega.co.nz`, `mega.io` (files, folders, embeds)
+- **TeraBox & Mirrors**:
+  `terabox.com`, `terabox.app`, `teraboxapp.com`, `1024tera.com`, `1024tera.co`, `1024terabox.com`,
+  `4funbox.com`, `mirrobox.com`, `nephobox.com`, `freeterabox.com`, `momerybox.com`, `tibibox.com`,
+  `gibibox.com`, `pebibox.com`, `dubox.com`, `bestclouddrive.com`, and all related shortlinks.
 
 ---
 
-## ⚠️ Folder / Multi-File Support (Experimental)
+## 🚀 Deployment Options
 
-The bot can resolve share links that contain **multiple files or folders**, but this feature is **untested in production**.
+### Option A: Google Colab (Recommended — High Speed & Free 100+ GB)
 
-- The bot will warn you: *"Folder support is experimental"*
-- Files are processed one by one in sequence
-- Very large folders (100+ files) may time out
+Run the bot with Google's gigabit network and 100+ GB free storage:
 
----
-
-## 📊 Measured Download Speeds
-
-Benchmarked on a real 7.70 MB video file (`Beautiful_Paki_CabinCrew.mp4`):
-
-| Streams | Speed | Time |
-|---------|-------|------|
-| 1 | 0.132 MB/s | 58.1 s |
-| 4 | 0.185 MB/s | 41.6 s |
-| 8 | 0.357 MB/s | 21.6 s |
-| **6 (default)** | **0.490 MB/s avg, 1.64 MB/s peak** | **15.8 s** |
-
-> These are honest measured numbers, not estimates. TeraBox throttles individual connections; parallel streams bypass the per-connection limit.
+1. Open [`terabot_v3_colab.ipynb`](file:///c:/Users/Lenovo/Desktop/terabotv2/terabot_v3_colab.ipynb) in [Google Colab](https://colab.research.google.com/).
+2. Run **Step 1**: Installs system tools (`ffmpeg`, `megatools`), clones repository, and installs requirements.
+3. Configure **Step 2**: Enter your Telegram credentials and Storage Channel ID.
+4. Run **Step 3**: Starts the anti-disconnect background keep-alive audio loop.
+5. Run **Step 4**: Starts the bot (`python bot.py`).
 
 ---
 
-## 📝 Logs
+### Option B: Local Workstation (Windows / Linux)
 
-Logs are written to `logs/bot.log` with automatic rotation (max 10 MB, 5 backups kept).
+#### 1. Clone repository & setup virtual environment
+```powershell
+git clone https://github.com/levithebutcher/terabot.git
+cd terabot
+py -m venv .venv
+.venv\Scripts\Activate.ps1    # On Windows PowerShell
+# source .venv/bin/activate    # On Linux / macOS
+```
 
-The log **never** records cookie values, bot tokens, or API keys.
+#### 2. Install dependencies & tools
+```powershell
+pip install -r requirements.txt
+```
+> **Note**: Install [FFmpeg](https://ffmpeg.org/download.html) and add it to your system `PATH` for video thumbnail generation and duration metadata.
 
-Error codes in log / user messages:
+#### 3. Create your `.env` configuration
+Copy the template and fill in your values:
+```powershell
+Copy-Item .env.example .env
+notepad .env
+```
 
-| Code | Meaning |
-|------|---------|
-| `[ERR-COOKIE]` | TeraBox session cookie expired or triggered verify_v2 |
-| `[ERR-SHARE]` | Share link expired, private, region-locked, or deleted |
-| `[ERR-CF]` | Cloudflare blocked the request — retry in 1-2 minutes |
-| `[ERR-RESOLVE]` | General resolver error (see log for full traceback) |
-| `[ERR-UPLOAD]` | Telegram upload failed (see log for full traceback) |
-| `[ERR-UNEXPECTED]` | Unhandled exception — always has full traceback in log |
-
----
-
-## 🔒 Security Notes
-
-- `.env` is excluded from git (`.gitignore`)
-- `*.session`, `*.db`, `logs/`, `downloads/`, `cookie.env/` are all excluded
-- Cookie and tokens are never logged or printed
-- Only users in `ALLOWED_USERS` (defaults to `ADMIN_IDS`) can use the bot
-- All downloads share your one TeraBox session — treat the bot as personal
-
----
-
-## 🛑 Graceful Shutdown
-
-Press **Ctrl+C**. The bot will:
-1. Stop accepting new requests
-2. Delete leftover `.part` download files
-3. Close the database connection
+#### 4. Run the bot
+```powershell
+py bot.py
+```
 
 ---
 
-## 🐳 Optional: Docker / Heroku
+### Option C: Docker Deployment
 
-Not covered here. The bot runs cleanly on bare Windows without any container.
-If you want to deploy to a VPS or Docker later, ensure:
-- `ffmpeg` and `ffprobe` are in the container image
-- The `.env` file is mounted as a secret (not baked into the image)
-- Persist `terabot_session.session` and `terabot.db` across restarts (volume mount)
+```powershell
+docker build -t terabot .
+docker run -d --name terabot --env-file .env -v terabot_data:/app/downloads terabot
+```
+
+---
+
+## ⚙️ Configuration Reference (`.env`)
+
+| Variable | Required | Default | Description |
+| :--- | :---: | :---: | :--- |
+| `BOT_TOKEN` | ✅ | — | Telegram Bot Token from [@BotFather](https://t.me/BotFather) |
+| `API_ID` | ✅ | — | Telegram API ID from [my.telegram.org](https://my.telegram.org/apps) |
+| `API_HASH` | ✅ | — | Telegram API Hash from [my.telegram.org](https://my.telegram.org/apps) |
+| `ADMIN_IDS` | ✅ | — | Comma-separated admin Telegram user IDs |
+| `ALLOWED_USERS` | ❌ | Admin IDs | Users permitted to use the bot (leave blank for admins only) |
+| `PRIVATE_CHAT_ID` | ❌ | None | Storage Channel ID (e.g. `-1001234567890`) for vault archiving & deduplication |
+| `TERABOX_COOKIE` | ❌ | None | TeraBox `ndus` browser cookie (required for TeraBox downloads) |
+| `DOWNLOAD_STREAMS` | ❌ | `12` | Parallel download streams per file (1–24) |
+| `MAX_FILE_SIZE_MB` | ❌ | `2000` | Maximum file size in MB (capped at Telegram's 2000 MB limit) |
+| `MAX_CONCURRENT_DOWNLOADS` | ❌ | `1` | Global maximum simultaneous download tasks |
+| `USER_RATE_LIMIT_SECONDS` | ❌ | `10` | Cooldown between requests per user |
+| `DOWNLOAD_DIR` | ❌ | `downloads` | Local temporary download folder |
+
+---
+
+## 🍪 How to Obtain TeraBox Cookie (`ndus`)
+
+1. Log into [1024tera.com](https://www.1024tera.com) in your browser.
+2. Open Developer Tools (`F12`) → **Application** tab → **Cookies** → `https://www.1024tera.com`.
+3. Locate the cookie named **`ndus`** and copy its value.
+4. Add it to your `.env` file:
+   ```env
+   TERABOX_COOKIE=ndus=YOUR_NDUS_VALUE_HERE; lang=en
+   ```
+
+---
+
+## 🔒 Security Best Practices
+
+- **Never commit your `.env` file** or session credentials to public repositories.
+- Keep `*.session`, `terabot.db`, and `cookie.env/` listed in your `.gitignore`.
+- Run `/delivery channel` to preserve your private chat clean while keeping everything organized in your private storage channel.
+
+---
+
+## 📄 License
+
+This project is licensed under the MIT License — see the [LICENSE](LICENSE) file for details.

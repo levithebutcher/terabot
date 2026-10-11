@@ -44,13 +44,13 @@ terabot/
 
 ### ⚙️ Environment Configuration (`.env` Schema):
 ```env
-BOT_TOKEN=8855145980:AAGd14EHWBjUAB-yld-XuDtZJkHZPSx1uAY
-API_ID=35293120
-API_HASH=6646b1e76da41504f226eec967a46b82
-ADMIN_IDS=8942914752
+BOT_TOKEN=YOUR_BOT_TOKEN_HERE
+API_ID=YOUR_API_ID_HERE
+API_HASH=YOUR_API_HASH_HERE
+ADMIN_IDS=YOUR_ADMIN_ID_HERE
 ALLOWED_USERS=
-PRIVATE_CHAT_ID=-1003798456772   # Storage Channel ID (Vault / Cache)
-TERABOX_COOKIE='ndus=YyU0vdupeHuifaLBfc-BuaJ9OwZITbjjcTOV66Yc;'
+PRIVATE_CHAT_ID=-100xxxxxxxxxx   # Storage Channel ID (Vault / Cache)
+TERABOX_COOKIE='ndus=YOUR_COOKIE_HERE;'
 DOWNLOAD_STREAMS=12
 MAX_FILE_SIZE_MB=2000
 MAX_CONCURRENT_DOWNLOADS=2
@@ -67,7 +67,7 @@ DOWNLOAD_DIR=downloads
 2. **"Code Mat Likho / Pehle Discuss Karo" Rule**:
    - When the user asks architectural questions or says "code mat likho", **DO NOT WRITE OR MODIFY CODE**. Present clear options, plans, or analysis first and wait for approval.
 3. **Storage Channel First Philosophy**:
-   - Channel ID: `-1003798456772` is the user's permanent **Storage Channel**.
+   - Channel ID: `-100xxxxxxxxxx` is the user's permanent **Storage Channel**.
    - All files must be archived to this channel.
 4. **Zero-Bandwidth Deduplication Mandate**:
    - If a file is already in the storage channel, the bot must **NEVER download it from Mega or TeraBox servers**. It must be skipped upfront before stream connections are opened.
@@ -83,7 +83,7 @@ DOWNLOAD_DIR=downloads
 ```mermaid
 flowchart TD
     A["User triggers download (Folder / Global Share)"] --> B["Fetch Nodes Metadata from Mega API (16 nodes)"]
-    B --> C["ensure_channel_synced(): Deep-scan channel (-1003798456772)<br>up to 1000 messages into SQLite"]
+    B --> C["ensure_channel_synced(): Deep-scan channel (-100xxxxxxxxxx)<br>up to 1000 messages into SQLite"]
     C --> D["partition_nodes_by_cache(): Check each node"]
     D --> E{"Is node in cache?<br>(#mg_tag OR caption filename + size ±3MB)"}
     E -- "YES (15 nodes)" --> F["Add to cached_nodes (Instant Skip)"]
@@ -119,7 +119,7 @@ flowchart TD
 ### 3.3. Delivery Modes (`/delivery`)
 User settings are stored in SQLite `user_settings` table:
 - **`channel` (Vault Mode / Zero Spam)**:
-  - Files are saved to the Storage Channel (`-1003798456772`).
+  - Files are saved to the Storage Channel (`-100xxxxxxxxxx`).
   - Zero files are forwarded to the bot DM.
   - Bot DM receives only real-time progress cards and the final completion receipt.
 - **`both` (Dual Mode / Default)**:
@@ -172,7 +172,7 @@ To prevent spamming 100 individual messages:
 👇 Click below to view all files:
 [ 🎬 Open Your Storage Channel ]   [ 🔄 Download Another Folder ]
 ```
-- Direct channel button URL format: `https://t.me/c/<channel_id_without_100>/1`. (For `-1003798456772` -> `https://t.me/c/3798456772/1`).
+- Direct channel button URL format: `https://t.me/c/<channel_id_without_100>/1`. (e.g. for `-1001234567890` -> `https://t.me/c/1234567890/1`).
 
 ---
 
@@ -224,7 +224,7 @@ To prevent spamming 100 individual messages:
 ### ☁️ Google Colab Execution Workflow:
 Open `terabot_v3_colab.ipynb` on Google Colab:
 1. **Step 1 (System packages & clone)**: Runs `apt-get install megatools ffmpeg`, clones latest GitHub repo, installs `requirements.txt`.
-2. **Step 2 (Credentials)**: Saves `.env` (pre-filled with bot token, API hash, channel ID `-1003798456772`).
+2. **Step 2 (Credentials)**: Saves `.env` (pre-filled with bot token, API hash, channel ID `-100xxxxxxxxxx`).
 3. **Step 3 (Anti-Disconnect Keep Alive)**: Starts silent audio loop to prevent Colab from sleeping.
 4. **Step 4 (Start Bot)**: Runs `git pull && python bot.py`.
 
