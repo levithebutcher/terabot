@@ -53,6 +53,21 @@ def make_stop_btn(user_id: int):
     return [[Button.inline("🛑 Abort Task", data=f"stop:{user_id}")]]
 
 
+def get_channel_button(channel_id: Optional[int]):
+    """Return inline button linking directly to the Storage Channel."""
+    if not channel_id:
+        return None
+    raw_str = str(channel_id).strip()
+    if raw_str.startswith("-100"):
+        cid = raw_str[4:]
+    elif raw_str.startswith("-"):
+        cid = raw_str[1:]
+    else:
+        cid = raw_str
+    url = f"https://t.me/c/{cid}/1"
+    return Button.url("🎬 Open Your Storage Channel", url)
+
+
 def render_mega_progress(
     action: str,
     name: str,
@@ -60,35 +75,43 @@ def render_mega_progress(
     total: int,
     speed: float,
     folder_header: str = "",
+    skipped_count: int = 0,
 ) -> str:
-    """Render a clean progress bar string matching the bot's visual theme without broken markdown tags."""
+    """Render a clean progress bar string matching the user's layout without broken markdown tags."""
     bar_width = 12
     speed_mb = speed / (1024 * 1024) if speed > 0 else 0.0
-    header_block = f"{folder_header.strip()}\n\n" if folder_header.strip() else ""
     clean_action = action.replace("**", "").strip()
+    skipped_line = f"⏩ **Skipped**: `{skipped_count} file(s)` (already saved)\n" if skipped_count > 0 else ""
 
     if total > 0:
         percent = (current / total) * 100.0
-        filled = int(bar_width * current // total)
+        filled = min(bar_width, int(bar_width * current // total))
         bar = "▰" * filled + "▱" * (bar_width - filled)
-        remaining = total - current
+        remaining = max(0, total - current)
         eta = remaining / speed if speed > 0 else 0
         eta_str = format_duration(eta)
+
+        folder_block = f"{folder_header.strip()}\n" if folder_header.strip() else ""
+        divider = "----------------------------------------------\n" if folder_block else ""
+
         return (
-            f"{header_block}"
-            f"**{clean_action}**: `{name}`\n\n"
-            f"[{bar}] **{percent:.1f}%**\n"
-            f"⚡ **Speed**: `{speed_mb:.2f} MB/s`\n"
-            f"📦 **Processed**: `{format_bytes(current)}` / `{format_bytes(total)}`\n"
+            f"[{bar}] **{percent:.1f}%** ({format_bytes(current)} / {format_bytes(total)}) • `{speed_mb:.2f} MB/s`\n\n"
+            f"{folder_block}"
+            f"{divider}"
+            f"⚡ **Status**: {clean_action}: `{name}`\n"
+            f"{skipped_line}"
             f"⏱ **ETA**: `{eta_str}`"
         )
     else:
+        folder_block = f"{folder_header.strip()}\n" if folder_header.strip() else ""
+        divider = "----------------------------------------------\n" if folder_block else ""
         return (
-            f"{header_block}"
-            f"**{clean_action}**: `{name}`\n\n"
-            f"⚡ **Speed**: `{speed_mb:.2f} MB/s`\n"
-            f"📦 **Downloaded**: `{format_bytes(current)}`\n"
-            f"⏳ **Status**: `Streaming high-speed chunks from Mega...`"
+            f"⚡ `{speed_mb:.2f} MB/s` • **Downloaded**: `{format_bytes(current)}`\n\n"
+            f"{folder_block}"
+            f"{divider}"
+            f"⚡ **Status**: {clean_action}: `{name}`\n"
+            f"{skipped_line}"
+            f"⏳ *Streaming high-speed chunks from Mega...*"
         )
 
 
@@ -1143,17 +1166,48 @@ async def stream_and_upload_nodes(
                 if stop_monitor.is_set():
                     break
 
-                folder_file_count = len(folder_nodes)
                 folder_total_size = sum(n.get("size", 0) for n in folder_nodes)
 
                 # Sort smallest first within THIS specific folder
                 folder_nodes = sorted(folder_nodes, key=lambda n: n.get("size", 0))
 
                 folder_header = (
-                    f"📁 **Folder [{folder_idx}/{total_folders}]**: `{curr_folder_name}` "
-                    f"({folder_file_count} files, {format_bytes(folder_total_size)})\n"
+                    f"📁 **Folder [{folder_idx}/{total_folders}]**: `{curr_folder_name}`"
                     if total_folders > 1 else ""
                 )
+
+                # Upfront Zero-Bandwidth Pre-Check for this folder!
+                missing_nodes, cached_nodes = await db.partition_nodes_by_cache(
+                    event.client, config.PRIVATE_CHAT_ID, folder_nodes
+                )
+                if cached_nodes:
+                    skipped_count += len(cached_nodes)
+                    skipped_size += sum(n.get("size", 0) for n in cached_nodes)
+                    logger.info(
+                        f"Folder '{curr_folder_name}': {len(cached_nodes)} files already in Storage Channel! "
+                        f"{len(missing_nodes)} files missing."
+                    )
+
+                if not missing_nodes:
+                    # ALL files in this folder are already cached in Storage Channel!
+                    # ZERO server calls to Mega!
+                    skip_header = f"{folder_header.strip()}\n" if folder_header.strip() else ""
+                    skip_txt = (
+                        f"[{'▰' * 12}] **100%** ({format_bytes(folder_total_size)} / {format_bytes(folder_total_size)})\n\n"
+                        f"{skip_header}"
+                        "----------------------------------------------\n"
+                        f"⚡ **Status**: All {len(cached_nodes)} files already saved in Storage Channel!\n"
+                        f"⏩ **Skipped**: `{skipped_count} file(s)` (0 MB server bandwidth needed)"
+                    )
+                    try:
+                        await status_msg.edit(skip_txt, buttons=make_stop_btn(user_id))
+                    except Exception:
+                        pass
+                    await asyncio.sleep(1.0)
+                    continue
+
+                folder_nodes = missing_nodes
+                folder_file_count = len(folder_nodes)
 
                 for file_idx, node in enumerate(folder_nodes, start=1):
                     if stop_monitor.is_set():
@@ -1183,7 +1237,7 @@ async def stream_and_upload_nodes(
 
                     file_key = f"mg_{node['h']}"
 
-                    # Storage Channel / DB cache check: SILENT SKIP IF ALREADY IN STORAGE!
+                    # Storage Channel / DB cache check: Secondary safety net
                     cached_msg = await db.find_cached_media(
                         event.client, config.PRIVATE_CHAT_ID, file_key, file_name=file_name, file_size=file_size
                     )
@@ -1191,7 +1245,6 @@ async def stream_and_upload_nodes(
                         logger.info(f"Storage cache hit for Mega node {node['h']} ({file_name})! Silently skipping...")
                         skipped_count += 1
                         skipped_size += file_size
-                        # Silent Skip: Do NOT forward to user's chat! Just update progress card.
                         skip_header = f"{folder_header.strip()}\n\n" if folder_header.strip() else ""
                         skip_txt = (
                             f"{skip_header}"
@@ -1243,6 +1296,7 @@ async def stream_and_upload_nodes(
                                 total=total,
                                 speed=speed,
                                 folder_header=folder_header,
+                                skipped_count=skipped_count,
                             )
                             try:
                                 await status_msg.edit(txt, buttons=make_stop_btn(user_id))
@@ -1314,6 +1368,7 @@ async def stream_and_upload_nodes(
                                 total=total,
                                 speed=speed,
                                 folder_header=folder_header,
+                                skipped_count=skipped_count,
                             )
                             try:
                                 await status_msg.edit(txt, buttons=make_stop_btn(user_id))
@@ -1363,11 +1418,14 @@ async def stream_and_upload_nodes(
             except Exception:
                 pass
 
-        completion_buttons = None
+        completion_buttons = []
+        ch_btn = get_channel_button(config.PRIVATE_CHAT_ID)
+        if ch_btn:
+            completion_buttons.append([ch_btn])
         if sess_id:
-            completion_buttons = [
-                [Button.inline("🔄 Download Another Folder from Same Link", data=f"m_reopen:{sess_id}")]
-            ]
+            completion_buttons.append([
+                Button.inline("🔄 Download Another Folder from Same Link", data=f"m_reopen:{sess_id}")
+            ])
 
         mode_label = "📬 Channel + Bot DM" if delivery_mode == "both" else "🛡️ Storage Channel Only (Vault Mode)"
         summary_lines = [
@@ -1387,9 +1445,12 @@ async def stream_and_upload_nodes(
         if config.PRIVATE_CHAT_ID:
             summary_lines.append(f"⚙️ **Delivery Mode**: `{mode_label}`")
 
-        summary_lines.append("\n💡 _Aap is link se doosre subfolders bhi bina link dobara send kiye download kar sakte hain!_")
+        if ch_btn:
+            summary_lines.append("\n👇 **Click below to view all files:**")
+        else:
+            summary_lines.append("\n💡 _Aap is link se doosre subfolders bhi bina link dobara send kiye download kar sakte hain!_")
 
-        await event.reply("\n".join(summary_lines), buttons=completion_buttons)
+        await event.reply("\n".join(summary_lines), buttons=completion_buttons if completion_buttons else None)
 
     finally:
         stop_monitor.set()

@@ -23,11 +23,16 @@ from core.resolver import (
     CookieExpiredError,
     ShareLinkExpiredError,
     CloudflareBlockedError,
-    ResolverError,
     TeraFile,
 )
 from core.uploader import TelethonUploader
-from core.mega_downloader import is_mega_url, process_mega_link, mega_mgr, set_active_tasks_ref
+from core.mega_downloader import (
+    is_mega_url,
+    process_mega_link,
+    mega_mgr,
+    set_active_tasks_ref,
+    get_channel_button,
+)
 from utils.helpers import extract_urls, format_bytes, format_duration
 from utils.jokes import can_send_joke, get_random_joke
 from utils.logger import logger
@@ -267,16 +272,68 @@ async def handle_delivery(event: events.NewMessage.Event):
 
     if arg in ["both", "dm", "default"]:
         await db.set_user_delivery_mode(user_id, "both")
+        buttons = [
+            [
+                Button.inline("🛡️ Switch to Channel Only", data="set_deliv:channel"),
+                Button.inline("✅ 📬 Both (Active)", data="set_deliv:both"),
+            ]
+        ]
         await event.reply(
             "📬 **Delivery Mode: Both (Channel + Bot DM)** [Active]\n\n"
             "• Naye files aapke **Storage Channel** mein save honge\n"
             "• Naye files **is bot chat mein bhi forward** honge\n"
             "• Storage mein pehle se maujood files direct **silently skip** honge (no spam!)\n\n"
-            "💡 _Agar bot chat ko silent rakhna ho (Vault Mode), use karein:_ `/delivery channel`"
+            "💡 _Agar bot chat ko silent rakhna ho (Vault Mode), use karein:_ `/delivery channel`",
+            buttons=buttons,
         )
     elif arg in ["channel", "vault", "silent", "channel_only"]:
         await db.set_user_delivery_mode(user_id, "channel")
+        buttons = [
+            [
+                Button.inline("✅ 🛡️ Channel Only (Active)", data="set_deliv:channel"),
+                Button.inline("📬 Switch to Both", data="set_deliv:both"),
+            ]
+        ]
         await event.reply(
+            "🛡️ **Delivery Mode: Storage Channel Only (Vault Mode)** [Active]\n\n"
+            "• Naye files **sirf Storage Channel** mein save honge\n"
+            "• Bot chat bilkul silent rahegi (koi media forward nahi hoga)\n"
+            "• Kaam khatam hone par yahan sirf **Final Summary Card** aayegi!\n\n"
+            "💡 _Dono jagah pane ke liye wapas switch karein:_ `/delivery both`",
+            buttons=buttons,
+        )
+    else:
+        current = await db.get_user_delivery_mode(user_id)
+        current_label = "📬 Both (Channel + Bot DM) [Default]" if current == "both" else "🛡️ Storage Channel Only (Vault Mode)"
+        buttons = [
+            [
+                Button.inline("🛡️ Channel Only (Vault)" if current != "channel" else "✅ 🛡️ Channel Only", data="set_deliv:channel"),
+                Button.inline("📬 Channel + Bot DM" if current != "both" else "✅ 📬 Channel + Bot DM", data="set_deliv:both"),
+            ]
+        ]
+        await event.reply(
+            f"📦 **Current Delivery Mode**: `{current_label}`\n\n"
+            "**Neeche button dabakar mode badlein ya command use karein:**\n"
+            "• `/delivery channel` - Sirf Channel mein save karo (Bot DM silent, 0 spam)\n"
+            "• `/delivery both` - Channel mein bhi save karo + Bot DM mein forward karo\n\n"
+            "💡 _Storage mein pehle se maujood files hamesha silently skip hoti hain taaki duplicate spam na ho._",
+            buttons=buttons,
+        )
+
+
+@client.on(events.CallbackQuery(pattern=r"^set_deliv:(channel|both)$"))
+async def handle_delivery_callback(event: events.CallbackQuery.Event):
+    user_id = event.sender_id
+    if not is_allowed_user(user_id):
+        await event.answer("⛔ Access denied.", alert=True)
+        return
+    mode_raw = event.pattern_match.group(1)
+    mode = mode_raw.decode("utf-8") if isinstance(mode_raw, bytes) else str(mode_raw)
+    await db.set_user_delivery_mode(user_id, mode)
+    await event.answer(f"✅ Delivery Mode: {mode.upper()}", alert=False)
+
+    if mode == "channel":
+        msg = (
             "🛡️ **Delivery Mode: Storage Channel Only (Vault Mode)** [Active]\n\n"
             "• Naye files **sirf Storage Channel** mein save honge\n"
             "• Bot chat bilkul silent rahegi (koi media forward nahi hoga)\n"
@@ -284,15 +341,23 @@ async def handle_delivery(event: events.NewMessage.Event):
             "💡 _Dono jagah pane ke liye wapas switch karein:_ `/delivery both`"
         )
     else:
-        current = await db.get_user_delivery_mode(user_id)
-        current_label = "📬 Both (Channel + Bot DM) [Default]" if current == "both" else "🛡️ Storage Channel Only (Vault Mode)"
-        await event.reply(
-            f"📦 **Current Delivery Mode**: `{current_label}`\n\n"
-            "**Options:**\n"
-            "• `/delivery both` - Channel mein save karo **aur** bot DM mein bhi bhejo (Mode B)\n"
-            "• `/delivery channel` - Sirf Channel mein save karo (Bot DM silent, sirf summary card)\n\n"
-            "💡 _Storage mein pehle se maujood files hamesha silently skip hoti hain taaki duplicate spam na ho._"
+        msg = (
+            "📬 **Delivery Mode: Both (Channel + Bot DM)** [Active]\n\n"
+            "• Naye files aapke **Storage Channel** mein save honge\n"
+            "• Naye files **is bot chat mein bhi forward** honge\n"
+            "• Storage mein pehle se maujood files direct **silently skip** honge (no spam!)\n\n"
+            "💡 _Agar bot chat ko silent rakhna ho (Vault Mode), use karein:_ `/delivery channel`"
         )
+    buttons = [
+        [
+            Button.inline("✅ 🛡️ Channel Only" if mode == "channel" else "🛡️ Switch to Channel Only", data="set_deliv:channel"),
+            Button.inline("✅ 📬 Channel + Bot DM" if mode == "both" else "📬 Switch to Both", data="set_deliv:both"),
+        ]
+    ]
+    try:
+        await event.edit(msg, buttons=buttons)
+    except Exception:
+        pass
 
 
 @client.on(events.NewMessage(pattern=r"^/broadcast(?:\s+([\s\S]+))?$", incoming=True, func=lambda e: not e.out))
@@ -860,6 +925,9 @@ async def process_terabox_link(
                 pass
 
         mode_label = "📬 Channel + Bot DM" if delivery_mode == "both" else "🛡️ Storage Channel Only (Vault Mode)"
+        ch_btn = get_channel_button(config.PRIVATE_CHAT_ID)
+        ch_buttons = [[ch_btn]] if ch_btn else None
+
         if is_multi_file or skipped_count > 0:
             summary_lines = [
                 "🎉 **TeraBox Transfer Complete!**\n",
@@ -870,12 +938,15 @@ async def process_terabox_link(
             summary_lines.append(f"📊 **Total Handled**: `{total_files} file(s)`")
             if config.PRIVATE_CHAT_ID:
                 summary_lines.append(f"⚙️ **Delivery Mode**: `{mode_label}`")
-            await event.reply("\n".join(summary_lines))
+            if ch_btn:
+                summary_lines.append("\n👇 **Click below to view all files:**")
+            await event.reply("\n".join(summary_lines), buttons=ch_buttons)
         elif total_files == 1 and skipped_count == 1:
             await event.reply(
                 "⚡ **File Already in Storage!**\n\n"
                 f"🎬 `{files[0].file_name}` (`{files[0].size_readable}`)\n\n"
-                "💡 _Ye file aapke storage channel mein pehle se maujood hai, isliye re-download skip kar diya gaya!_"
+                "💡 _Ye file aapke storage channel mein pehle se maujood hai, isliye re-download skip kar diya gaya!_",
+                buttons=ch_buttons,
             )
 
     except Exception as e:
