@@ -695,7 +695,7 @@ async def process_terabox_link(
                     file_paths=album_paths,
                     captions=album_captions,
                     progress_callback=album_item_progress,
-                    workers=10,
+                    workers=12,
                 )
                 if config.PRIVATE_CHAT_ID and msgs and delivery_mode == "both":
                     try:
@@ -732,7 +732,7 @@ async def process_terabox_link(
                             file_path=p,
                             caption=cap,
                             progress_callback=None,
-                            workers=10,
+                            workers=12,
                         )
                         if config.PRIVATE_CHAT_ID and sent and delivery_mode == "both":
                             try:
@@ -864,7 +864,7 @@ async def process_terabox_link(
                         caption=caption,
                         thumb_path=None,
                         progress_callback=upload_progress,
-                        workers=10,
+                        workers=12,
                     )
                     if sent_msg:
                         if config.PRIVATE_CHAT_ID and delivery_mode == "both":

@@ -22,8 +22,8 @@ class TeraBoxDownloader:
     streaming chunk writes, live speed tracking, and single-stream fallback.
     """
 
-    CHUNK_SIZE = 256 * 1024  # 256 KB buffer for smooth high-speed TCP streaming
-    DEFAULT_PARALLEL_CONNECTIONS = 10
+    CHUNK_SIZE = 512 * 1024  # 512 KB buffer for high-speed TCP streaming
+    DEFAULT_PARALLEL_CONNECTIONS = 12
 
     def __init__(self, cookie: Optional[str] = None, connections: int = DEFAULT_PARALLEL_CONNECTIONS):
         self.cookie = cookie if cookie is not None else TERABOX_COOKIE
@@ -82,6 +82,7 @@ class TeraBoxDownloader:
 
                     with open(output_file_path, "r+b") as f:
                         f.seek(current_start)
+                        unreported = 0
                         async for chunk in resp.content.iter_chunked(self.CHUNK_SIZE):
                             if not chunk:
                                 break
@@ -94,23 +95,26 @@ class TeraBoxDownloader:
                             f.write(chunk_to_write)
                             chunk_len = len(chunk_to_write)
                             part_downloaded += chunk_len
+                            unreported += chunk_len
 
-                            # Update aggregate progress
-                            async with lock:
-                                progress_tracker["downloaded"] += chunk_len
-                                progress_tracker["recent_bytes"] += chunk_len
-                                now = time.monotonic()
-                                elapsed = now - progress_tracker["last_time"]
+                            # Update aggregate progress smoothly without per-chunk lock overhead
+                            if unreported >= self.CHUNK_SIZE or part_downloaded >= part_expected:
+                                async with lock:
+                                    progress_tracker["downloaded"] += unreported
+                                    progress_tracker["recent_bytes"] += unreported
+                                    now = time.monotonic()
+                                    elapsed = now - progress_tracker["last_time"]
 
-                                if elapsed >= 1.0 or progress_tracker["downloaded"] >= total_size:
-                                    speed = progress_tracker["recent_bytes"] / elapsed if elapsed > 0 else 0.0
-                                    progress_tracker["last_time"] = now
-                                    progress_tracker["recent_bytes"] = 0
-                                    if progress_callback:
-                                        if asyncio.iscoroutinefunction(progress_callback):
-                                            await progress_callback(progress_tracker["downloaded"], total_size, speed)
-                                        else:
-                                            progress_callback(progress_tracker["downloaded"], total_size, speed)
+                                    if elapsed >= 1.0 or progress_tracker["downloaded"] >= total_size:
+                                        speed = progress_tracker["recent_bytes"] / elapsed if elapsed > 0 else 0.0
+                                        progress_tracker["last_time"] = now
+                                        progress_tracker["recent_bytes"] = 0
+                                        if progress_callback:
+                                            if asyncio.iscoroutinefunction(progress_callback):
+                                                await progress_callback(progress_tracker["downloaded"], total_size, speed)
+                                            else:
+                                                progress_callback(progress_tracker["downloaded"], total_size, speed)
+                                unreported = 0
 
                 if part_downloaded >= part_expected:
                     return part_downloaded
@@ -157,7 +161,7 @@ class TeraBoxDownloader:
 
         timeout = aiohttp.ClientTimeout(total=3600, connect=30, sock_read=90)
         conn = aiohttp.TCPConnector(limit=connections + 4, ttl_dns_cache=300)
-        async with aiohttp.ClientSession(connector=conn) as session:
+        async with aiohttp.ClientSession(connector=conn, read_bufsize=1024 * 1024) as session:
             tasks = [
                 self._download_range_chunk(
                     session=session,
@@ -211,7 +215,7 @@ class TeraBoxDownloader:
             headers["Range"] = f"bytes={downloaded_so_far}-"
 
         timeout = aiohttp.ClientTimeout(total=3600, connect=30, sock_read=90)
-        async with aiohttp.ClientSession(headers=headers) as session:
+        async with aiohttp.ClientSession(headers=headers, read_bufsize=1024 * 1024) as session:
             async with session.get(dlink, timeout=timeout) as response:
                 if response.status not in (200, 206):
                     if response.status == 416:  # Range Not Satisfiable (already completed)
