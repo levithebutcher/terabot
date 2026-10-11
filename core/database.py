@@ -512,7 +512,64 @@ class Database:
                 self.is_channel_synced = True
                 logger.info(f"Storage channel cache synchronized: {count} media records indexed.")
             except Exception as e:
-                logger.debug(f"Storage channel cache sync notice: {e}")
+                # Fallback: Telegram restricts iter_messages for bot accounts.
+                # Use ID batching via get_messages(ids=...) which is 100% supported for bots!
+                try:
+                    count = 0
+                    probe = await client.send_message(channel_id, "🔄 Indexing storage channel...")
+                    latest_id = probe.id
+                    await client.delete_messages(channel_id, [probe.id])
+
+                    batch_size = 100
+                    start_min = max(1, latest_id - limit)
+                    for start_id in range(start_min, latest_id + 1, batch_size):
+                        batch_ids = list(range(start_id, min(start_id + batch_size, latest_id + 1)))
+                        msgs = await client.get_messages(channel_id, ids=batch_ids)
+
+                        for msg in msgs:
+                            if not msg or not msg.media:
+                                continue
+                            caption = msg.text or msg.message or ""
+                            f_name = msg.file.name if getattr(msg, "file", None) else ""
+                            f_size = msg.file.size if getattr(msg, "file", None) else 0
+
+                            m_sz = re.search(r"#sz_(\d+)", caption)
+                            if m_sz:
+                                f_size = int(m_sz.group(1))
+
+                            if not f_name and caption:
+                                m_code = re.search(r"[`'\"]([^`'\"]+\.[a-zA-Z0-9]{2,5})[`'\"]", caption)
+                                if m_code:
+                                    f_name = m_code.group(1).strip()
+                                else:
+                                    m_icon = re.search(r"(?:🎬|🖼️|📄|📁)\s*([^\n\r()]+?\.[a-zA-Z0-9]{2,5})", caption)
+                                    if m_icon:
+                                        f_name = m_icon.group(1).strip()
+                                    else:
+                                        m_ext = re.search(
+                                            r"([a-zA-Z0-9_\-\.\s]+\.(?:mp4|mkv|avi|mov|wmv|flv|webm|jpg|jpeg|png|zip|rar|tar))",
+                                            caption,
+                                            re.IGNORECASE,
+                                        )
+                                        if m_ext:
+                                            f_name = m_ext.group(1).strip()
+
+                            m_tag = re.search(r"#(mg_[a-zA-Z0-9_\-]+|tb_[a-zA-Z0-9_\-]+)", caption)
+                            file_key = m_tag.group(1) if m_tag else None
+
+                            if not file_key and f_size > 0:
+                                file_key = f"sz_{f_size}"
+
+                            if file_key or f_size > 0:
+                                fk = file_key or f"msg_{msg.id}"
+                                fn = f_name or f"media_{msg.id}"
+                                await self.save_cached_file(fk, fn, f_size, channel_id, msg.id)
+                                count += 1
+
+                    self.is_channel_synced = True
+                    logger.info(f"Storage channel cache synchronized via ID batching: {count} media records indexed.")
+                except Exception as id_err:
+                    logger.debug(f"Storage channel ID batching notice: {id_err}")
 
     async def ensure_channel_synced(self, client, channel_id: Optional[int], limit: int = 500):
         """Ensure recent storage channel records are cached for instant local hits."""
