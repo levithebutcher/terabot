@@ -87,6 +87,11 @@ DOWNLOAD_DIR: Path = BASE_DIR / os.getenv("DOWNLOAD_DIR", "downloads")
 DOWNLOAD_DIR.mkdir(parents=True, exist_ok=True)
 
 DB_PATH: Path = BASE_DIR / "terabot.db"
+
+# MongoDB Atlas (Persistent cross-environment storage for Railway & Colab)
+MONGO_URI: str = os.getenv("MONGO_URI", "").strip()
+MONGO_DB_NAME: str = os.getenv("MONGO_DB_NAME", "terabot").strip()
+
 LOG_DIR: Path = BASE_DIR / "logs"
 LOG_DIR.mkdir(parents=True, exist_ok=True)
 LOG_FILE: Path = LOG_DIR / "bot.log"

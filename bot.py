@@ -160,7 +160,7 @@ async def handle_help(event: events.NewMessage.Event):
         "📖 **TeraBox Bot Commands & Usage**\n\n"
         "• `/start` - Start the bot & view system status\n"
         "• `/filter [video|photo|all]` - Filter files in folders\n"
-        "• `/delivery [both|channel]` - Delivery mode (Both DM+Channel or Channel only)\n"
+        "• `/delivery [channel|both]` - Delivery mode (Default: Silent Storage Channel only)\n"
         "• `/stop` or `/cancel` - Abort active download/upload\n"
         "• `/ping` - Check bot responsiveness & latency\n"
         "• `/help` - Show this help menu\n"
@@ -270,7 +270,7 @@ async def handle_delivery(event: events.NewMessage.Event):
 
     arg = (event.pattern_match.group(1) or "").strip().lower()
 
-    if arg in ["both", "dm", "default"]:
+    if arg in ["both", "dm"]:
         await db.set_user_delivery_mode(user_id, "both")
         buttons = [
             [
@@ -286,7 +286,7 @@ async def handle_delivery(event: events.NewMessage.Event):
             "💡 _Agar bot chat ko silent rakhna ho (Vault Mode), use karein:_ `/delivery channel`",
             buttons=buttons,
         )
-    elif arg in ["channel", "vault", "silent", "channel_only"]:
+    elif arg in ["channel", "vault", "silent", "channel_only", "default"]:
         await db.set_user_delivery_mode(user_id, "channel")
         buttons = [
             [
@@ -295,26 +295,26 @@ async def handle_delivery(event: events.NewMessage.Event):
             ]
         ]
         await event.reply(
-            "🛡️ **Delivery Mode: Storage Channel Only (Vault Mode)** [Active]\n\n"
+            "🛡️ **Delivery Mode: Storage Channel Only (Vault Mode)** [Default Active]\n\n"
             "• Naye files **sirf Storage Channel** mein save honge\n"
             "• Bot chat bilkul silent rahegi (koi media forward nahi hoga)\n"
             "• Kaam khatam hone par yahan sirf **Final Summary Card** aayegi!\n\n"
-            "💡 _Dono jagah pane ke liye wapas switch karein:_ `/delivery both`",
+            "💡 _Dono jagah pane ke liye switch karein:_ `/delivery both`",
             buttons=buttons,
         )
     else:
         current = await db.get_user_delivery_mode(user_id)
-        current_label = "📬 Both (Channel + Bot DM) [Default]" if current == "both" else "🛡️ Storage Channel Only (Vault Mode)"
+        current_label = "🛡️ Storage Channel Only (Vault Mode) [Default]" if current == "channel" else "📬 Both (Channel + Bot DM)"
         buttons = [
             [
-                Button.inline("🛡️ Channel Only (Vault)" if current != "channel" else "✅ 🛡️ Channel Only", data="set_deliv:channel"),
-                Button.inline("📬 Channel + Bot DM" if current != "both" else "✅ 📬 Channel + Bot DM", data="set_deliv:both"),
+                Button.inline("✅ 🛡️ Channel Only" if current == "channel" else "🛡️ Switch to Channel Only", data="set_deliv:channel"),
+                Button.inline("✅ 📬 Channel + Bot DM" if current == "both" else "📬 Switch to Both", data="set_deliv:both"),
             ]
         ]
         await event.reply(
             f"📦 **Current Delivery Mode**: `{current_label}`\n\n"
             "**Neeche button dabakar mode badlein ya command use karein:**\n"
-            "• `/delivery channel` - Sirf Channel mein save karo (Bot DM silent, 0 spam)\n"
+            "• `/delivery channel` - Sirf Channel mein save karo (Bot DM silent, 0 spam) [Default]\n"
             "• `/delivery both` - Channel mein bhi save karo + Bot DM mein forward karo\n\n"
             "💡 _Storage mein pehle se maujood files hamesha silently skip hoti hain taaki duplicate spam na ho._",
             buttons=buttons,

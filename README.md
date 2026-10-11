@@ -16,8 +16,9 @@ An asynchronous, high-performance Telegram bot that downloads files and folders 
 - 📁 **Mega Subfolder Explorer**: Interactive inline navigation for complex Mega directory trees with 6 folders per page, pagination (`⬅️ Previous` / `Next ➡️`), and search (`🔍 Search Subfolder`).
 - 🔄 **Sequential Folder-by-Folder Downloads**: Downloads multi-folder shares strictly folder-by-folder (smallest to largest), flushing albums at each folder boundary to prevent cross-folder mixing.
 - 🛡️ **Dual Delivery Modes (`/delivery`)**:
-  - `channel` (Vault Mode): Saves all media silently to your Storage Channel. DM receives only progress cards and completion receipts (zero spam).
-  - `both` (Dual Mode / Default): Saves to the Storage Channel AND forwards newly downloaded files to your bot DM. Cached files are skipped silently.
+  - `channel` (Vault Mode / Default): Saves all media silently to your Storage Channel. DM receives only progress cards and completion receipts (zero spam).
+  - `both` (Dual Mode / Optional): Saves to the Storage Channel AND forwards newly downloaded files to your bot DM. Cached files are skipped silently.
+- ☁️ **MongoDB Atlas Cross-Environment Caching**: Shared cloud cache across Railway, Google Colab, and local workstation ensures that files are never re-downloaded even across server redeploys or environment switches. Fallback to local SQLite when unconfigured.
 - 🎬 **10-Item Telegram Album Batching**: Automatically groups videos ($\le 20\text{ MB}$) and photos ($\le 100\text{ MB}$) into 10-item Telegram media albums.
 - 🎯 **File Type Filtering (`/filter`)**: Select download filters on the fly (`/filter video`, `/filter photo`, `/filter other`, `/filter all`).
 - 📊 **Real-Time Progress & Direct Channel Button**: Live progress cards with transfer speeds and estimated time of arrival (ETA), finishing with a one-click button linking directly to the storage channel.

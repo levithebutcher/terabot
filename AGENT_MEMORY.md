@@ -15,10 +15,12 @@
 - **Telegram MTProto Client**: `Telethon` (custom session `terabot_session`, high-speed chunk streaming with multi-worker uploads).
 - **Mega Engine**: Custom fast crypto engine using `cryptography` (OpenSSL AES-NI C bindings, ~1 GB/s) + fallback to PyCryptodome / pyaes, direct HTTPS chunk streaming via `aiohttp`. Optional CLI engines: `megatools`, `mega-cmd`.
 - **TeraBox Engine**: Direct parallel chunk download via `aiohttp` streams (configurable 1–24 connections), custom resolver (`core/resolver.py`).
-- **Database & Cache**: `aiosqlite` SQLite database (`terabot.db`) managing file caches, user delivery preferences, filter modes, and user activity.
+- **Database & Cache**: Dual-Engine Architecture:
+  - **MongoDB Atlas (Primary Cloud Store)**: Shared persistence across Railway, Google Colab, and local workstation. Survives container rebuilds and notebook restarts.
+  - **SQLite (Local Fallback)**: Embedded `aiosqlite` (`terabot.db`) fallback when `MONGO_URI` is not configured.
 - **Media Processing**: `ffmpeg` for video duration extraction and automatic thumbnail generation.
 - **Execution Environments**:
-  - Primary: **Google Colab High-Speed Edition** (`terabot_v3_colab.ipynb` with 100+ GB disk, high RAM, and audio keep-alive).
+  - Primary: **Google Colab High-Speed Edition** (`terabot_v3_colab.ipynb` with 100+ GB disk, high RAM, and audio keep-alive) and **Railway Container Deployment**.
   - Secondary: Local Windows workstation (Python launcher `py`).
 
 ### 🗂️ Repository Directory Structure:
@@ -27,10 +29,10 @@ terabot/
 ├── AGENT_MEMORY.md              # THIS FILE — Master Brain & Knowledge Base
 ├── bot.py                       # Main Telegram bot dispatcher, commands & event handlers
 ├── config.py                    # Environment configuration loader (.env)
-├── requirements.txt             # Project dependencies
+├── requirements.txt             # Project dependencies (telethon, aiosqlite, motor, dnspython, etc.)
 ├── terabot_v3_colab.ipynb       # Production Google Colab notebook (pre-filled v3.0)
 ├── core/
-│   ├── database.py              # SQLite cache, channel deep-indexer & deduplication
+│   ├── database.py              # Dual MongoDB Atlas + SQLite cache & deduplication engine
 │   ├── mega_downloader.py       # Mega folder tree parser, Subfolder Explorer, streaming
 │   ├── downloader.py            # TeraBox multi-stream downloader
 │   ├── uploader.py              # Telethon high-speed album & standalone uploader
@@ -50,6 +52,8 @@ API_HASH=YOUR_API_HASH_HERE
 ADMIN_IDS=YOUR_ADMIN_ID_HERE
 ALLOWED_USERS=
 PRIVATE_CHAT_ID=-100xxxxxxxxxx   # Storage Channel ID (Vault / Cache)
+MONGO_URI=mongodb+srv://<username>:<password>@cluster0.xxxx.mongodb.net/?appName=Cluster0
+MONGO_DB_NAME=terabot
 TERABOX_COOKIE='ndus=YOUR_COOKIE_HERE;'
 DOWNLOAD_STREAMS=12
 MAX_FILE_SIZE_MB=2000
@@ -115,12 +119,12 @@ flowchart TD
 ---
 
 ### 3.3. Delivery Modes (`/delivery`)
-User settings are stored in SQLite `user_settings` table:
-- **`channel` (Vault Mode / Zero Spam)**:
-  - Files are saved to the Storage Channel (`-100xxxxxxxxxx`).
-  - Zero files are forwarded to the bot DM.
-  - Bot DM receives only real-time progress cards and the final completion receipt.
-- **`both` (Dual Mode / Default)**:
+User settings are stored in MongoDB Atlas `user_settings` collection (and SQLite fallback):
+- **`channel` (Vault Mode / Zero Spam) [DEFAULT]**:
+  - Files are saved directly to the Storage Channel (`-100xxxxxxxxxx`).
+  - Zero media files are forwarded to the bot DM.
+  - Bot DM receives only real-time progress cards and the final completion receipt with link to the channel.
+- **`both` (Dual Mode / Optional)**:
   - Files are saved to the Storage Channel AND forwarded to the bot DM.
   - Already-cached files are silently skipped and NEVER forwarded as duplicate spam.
 
