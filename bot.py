@@ -855,7 +855,7 @@ async def process_terabox_link(
                         except Exception:
                             pass
 
-                caption = f"🎬 `{file_obj.file_name}` (`{file_obj.size_readable}`)\n`#{file_key}`"
+                caption = f"🎬 `{file_obj.file_name}` (`{file_obj.size_readable}`)\n`#{file_key}` `#sz_{file_obj.size}`"
 
                 try:
                     sent_msg = await uploader.upload_media(
@@ -904,7 +904,7 @@ async def process_terabox_link(
                 album_paths.append(downloaded_file)
                 album_keys.append(file_key)
                 icon = "🎬" if is_video else "🖼️"
-                album_captions.append(f"{icon} `{file_obj.file_name}` (`{file_obj.size_readable}`)\n`#{file_key}`")
+                album_captions.append(f"{icon} `{file_obj.file_name}` (`{file_obj.size_readable}`)\n`#{file_key}` `#sz_{file_obj.size}`")
                 album_size += file_obj.size
 
                 # If batch reached 10 items or 200MB, upload this completed batch immediately!
@@ -917,37 +917,40 @@ async def process_terabox_link(
         # Flush remaining album files
         await flush_album()
 
-        # Finish up
-        if status_msg:
-            try:
-                await status_msg.delete()
-            except Exception:
-                pass
-
+        # Finish up - Deliver completion notification card to Bot DM
         mode_label = "📬 Channel + Bot DM" if delivery_mode == "both" else "🛡️ Storage Channel Only (Vault Mode)"
         ch_btn = get_channel_button(config.PRIVATE_CHAT_ID)
         ch_buttons = [[ch_btn]] if ch_btn else None
 
-        if is_multi_file or skipped_count > 0:
-            summary_lines = [
-                "🎉 **TeraBox Transfer Complete!**\n",
-                f"📤 **Newly Uploaded**: `{uploaded_count} file(s)` ({format_bytes(uploaded_size)})",
-            ]
-            if skipped_count > 0:
-                summary_lines.append(f"⏩ **Skipped (Already in Storage)**: `{skipped_count} file(s)` ({format_bytes(skipped_size)})")
-            summary_lines.append(f"📊 **Total Handled**: `{total_files} file(s)`")
-            if config.PRIVATE_CHAT_ID:
-                summary_lines.append(f"⚙️ **Delivery Mode**: `{mode_label}`")
-            if ch_btn:
-                summary_lines.append("\n👇 **Click below to view all files:**")
-            await event.reply("\n".join(summary_lines), buttons=ch_buttons)
-        elif total_files == 1 and skipped_count == 1:
-            await event.reply(
-                "⚡ **File Already in Storage!**\n\n"
-                f"🎬 `{files[0].file_name}` (`{files[0].size_readable}`)\n\n"
-                "💡 _Ye file aapke storage channel mein pehle se maujood hai, isliye re-download skip kar diya gaya!_",
-                buttons=ch_buttons,
-            )
+        summary_lines = [
+            "🎉 **TeraBox Transfer Complete!**\n",
+            f"📤 **Newly Uploaded**: `{uploaded_count} file(s)` ({format_bytes(uploaded_size)})",
+        ]
+        if skipped_count > 0:
+            summary_lines.append(f"⏩ **Skipped (Already in Storage)**: `{skipped_count} file(s)` ({format_bytes(skipped_size)})")
+        summary_lines.append(f"📊 **Total Handled**: `{total_files} file(s)`")
+        if config.PRIVATE_CHAT_ID:
+            summary_lines.append(f"⚙️ **Delivery Mode**: `{mode_label}`")
+        if ch_btn:
+            summary_lines.append("\n👇 **Click below to view all files:**")
+
+        receipt_text = "\n".join(summary_lines)
+        sent_receipt = False
+        if status_msg:
+            try:
+                await status_msg.edit(receipt_text, buttons=ch_buttons)
+                sent_receipt = True
+            except Exception:
+                pass
+
+        if not sent_receipt:
+            try:
+                await event.respond(receipt_text, buttons=ch_buttons)
+            except Exception:
+                try:
+                    await event.reply(receipt_text, buttons=ch_buttons)
+                except Exception:
+                    pass
 
     except Exception as e:
         logger.error(f"Pipeline error: {e}", exc_info=True)

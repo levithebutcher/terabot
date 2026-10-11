@@ -648,6 +648,13 @@ class MegaExplorerManager:
             nav_row.append(Button.inline("Next ➡️", data=f"m_nav:{sess.session_id}:{page + 1}"))
         buttons.append(nav_row)
 
+        # Delivery Mode quick toggle row (Proposal 1 Option A)
+        deliv_mode = await db.get_user_delivery_mode(sess.user_id)
+        deliv_label = "🛡️ Mode: Channel Only (Vault)" if deliv_mode == "channel" else "📬 Mode: Channel + Bot DM"
+        buttons.append([
+            Button.inline(f"{deliv_label} 🔄", data=f"m_togdeliv:{sess.session_id}")
+        ])
+
         # Action row
         buttons.append([
             Button.inline("🔍 Search by Name", data=f"m_srch:{sess.session_id}"),
@@ -776,7 +783,10 @@ class MegaExplorerManager:
             f"👇 **Neeche option chunne par direct sequential download shuru hoga:**"
         )
 
+        deliv_mode = await db.get_user_delivery_mode(sess.user_id)
+        deliv_label = "🛡️ Mode: Channel Only (Vault)" if deliv_mode == "channel" else "📬 Mode: Channel + Bot DM"
         buttons = [
+            [Button.inline(f"{deliv_label} 🔄", data=f"m_togdeliv:{sess.session_id}")],
             [Button.inline(f"🎬 Download All Videos ({num_v}) [Sequential]", data=f"m_allact:{sess.session_id}:video")],
             [Button.inline(f"📁 Download Everything ({tot_files}) [Sequential]", data=f"m_allact:{sess.session_id}:all")],
             [
@@ -867,6 +877,20 @@ class MegaExplorerManager:
                 pass
             if not sess.future.done():
                 sess.future.set_result((act_type, None))
+
+        elif action_prefix == "m_togdeliv":
+            curr_mode = await db.get_user_delivery_mode(sess.user_id)
+            new_mode = "channel" if curr_mode == "both" else "both"
+            await db.set_user_delivery_mode(sess.user_id, new_mode)
+            mode_text = "🛡️ CHANNEL ONLY (Vault)" if new_mode == "channel" else "📬 CHANNEL + BOT DM"
+            try:
+                await event.answer(f"✅ Mode switched to: {mode_text}", alert=False)
+            except Exception:
+                pass
+            if sess.current_dir_h:
+                await self.render_folder_details(sess, sess.current_dir_h, event=event)
+            else:
+                await self.render_explorer(sess, page=sess.current_page, event=event)
 
         elif action_prefix == "m_reopen":
             try:
@@ -1333,7 +1357,7 @@ async def stream_and_upload_nodes(
                         album_paths.append(dest_path)
                         album_keys.append(file_key)
                         icon = "🎬" if is_video else "🖼️"
-                        album_captions.append(f"{icon} `{dest_path.name}` (`{format_bytes(actual_size)}`)\n`#{file_key}`")
+                        album_captions.append(f"{icon} `{dest_path.name}` (`{format_bytes(actual_size)}`)\n`#{file_key}` `#sz_{actual_size}`")
                         album_size += actual_size
 
                         # If batch reached 10 items or 200MB, upload this completed batch immediately!
@@ -1375,7 +1399,7 @@ async def stream_and_upload_nodes(
                             except Exception:
                                 pass
 
-                    caption = f"🎬 `{dest_path.name}` (`{format_bytes(actual_size)}`)\n`#{file_key}`"
+                    caption = f"🎬 `{dest_path.name}` (`{format_bytes(actual_size)}`)\n`#{file_key}` `#sz_{actual_size}`"
 
                     sent_msg = await uploader.upload_media(
                         chat_id=target_chat_id,
@@ -1412,12 +1436,6 @@ async def stream_and_upload_nodes(
         # Flush any remaining album items
         await flush_album()
 
-        if status_msg:
-            try:
-                await status_msg.delete()
-            except Exception:
-                pass
-
         completion_buttons = []
         ch_btn = get_channel_button(config.PRIVATE_CHAT_ID)
         if ch_btn:
@@ -1450,7 +1468,23 @@ async def stream_and_upload_nodes(
         else:
             summary_lines.append("\n💡 _Aap is link se doosre subfolders bhi bina link dobara send kiye download kar sakte hain!_")
 
-        await event.reply("\n".join(summary_lines), buttons=completion_buttons if completion_buttons else None)
+        completion_text = "\n".join(summary_lines)
+        sent_receipt = False
+        if status_msg:
+            try:
+                await status_msg.edit(completion_text, buttons=completion_buttons if completion_buttons else None)
+                sent_receipt = True
+            except Exception:
+                pass
+
+        if not sent_receipt:
+            try:
+                await event.respond(completion_text, buttons=completion_buttons if completion_buttons else None)
+            except Exception:
+                try:
+                    await event.reply(completion_text, buttons=completion_buttons if completion_buttons else None)
+                except Exception:
+                    pass
 
     finally:
         stop_monitor.set()
@@ -1711,7 +1745,7 @@ async def process_mega_link(
                         pass
 
             file_key = f"mg_{abs(hash(f.name + str(file_size)))}"
-            caption = f"🎬 `{f.name}` (`{format_bytes(file_size)}`)\n`#{file_key}`"
+            caption = f"🎬 `{f.name}` (`{format_bytes(file_size)}`)\n`#{file_key}` `#sz_{file_size}`"
 
             sent_msg = await uploader.upload_media(
                 chat_id=target_chat_id,

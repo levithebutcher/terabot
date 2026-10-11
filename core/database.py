@@ -43,10 +43,8 @@ class Database:
                     delivery_mode TEXT DEFAULT 'both'
                 )
             """)
-            try:
-                await db.execute("ALTER TABLE user_settings ADD COLUMN delivery_mode TEXT DEFAULT 'both'")
-            except Exception:
-                pass
+            await db.execute("CREATE INDEX IF NOT EXISTS idx_cached_size ON cached_files(file_size)")
+            await db.execute("CREATE INDEX IF NOT EXISTS idx_cached_name ON cached_files(file_name)")
             await db.commit()
         logger.info(f"Database initialized at {self.db_path}")
 
@@ -155,8 +153,22 @@ class Database:
             )
             await db.commit()
 
+    async def get_cached_file_by_exact_size(self, file_size: int) -> Optional[tuple[int, int]]:
+        """Retrieve (channel_id, message_id) if exact file_size exists in SQLite cache."""
+        if file_size <= 0:
+            return None
+        async with aiosqlite.connect(self.db_path) as db:
+            async with db.execute(
+                "SELECT channel_id, message_id FROM cached_files WHERE file_size = ?",
+                (file_size,),
+            ) as cursor:
+                row = await cursor.fetchone()
+                if row:
+                    return int(row[0]), int(row[1])
+        return None
+
     async def get_cached_file_by_name_size(self, file_name: str, file_size: int = 0) -> Optional[tuple[int, int]]:
-        """Retrieve (channel_id, message_id) by exact or matching name & size from SQLite cache."""
+        """Retrieve (channel_id, message_id) by matching name & size from SQLite cache."""
         clean_name = file_name.strip().lower()
         if not clean_name:
             return None
@@ -189,7 +201,94 @@ class Database:
                         return int(row[0]), int(row[1])
         return None
 
-    async def sync_channel_cache(self, client, channel_id: Optional[int], limit: int = 1000, force: bool = False):
+    async def search_channel_media(
+        self,
+        client,
+        channel_id: Optional[int],
+        file_key: str = "",
+        file_name: str = "",
+        file_size: int = 0,
+    ) -> Optional[tuple[int, int]]:
+        """
+        Proposal 2: Universal Server-Side Telegram Deep Search & Multi-Tier Deduplication.
+        Works across Railway & Colab without message count restrictions.
+        1. Fast local SQLite cache lookup (0ms)
+        2. Telegram Server Search by unique key (#mg_<h> or #tb_<fs_id>)
+        3. Telegram Server Search by exact size tag (#sz_<bytes>) -> Rule 1
+        4. Telegram Server Search by clean filename stem (with size verification) -> Rule 2
+        """
+        if not channel_id or not client:
+            return None
+
+        # --- TIER 1: FAST LOCAL SQLITE LOOKUP (0ms) ---
+        if file_key:
+            cached = await self.get_cached_file(file_key)
+            if cached:
+                return cached
+
+        if file_size > 0:
+            cached_by_size = await self.get_cached_file_by_exact_size(file_size)
+            if cached_by_size:
+                return cached_by_size
+
+        if file_name and file_size > 0:
+            cached_by_name = await self.get_cached_file_by_name_size(file_name, file_size)
+            if cached_by_name:
+                return cached_by_name
+
+        # --- TIER 2: TELEGRAM SERVER-SIDE NATIVE SEARCH ---
+        try:
+            # 2A. Search by unique key hashtag
+            if file_key:
+                async for msg in client.iter_messages(channel_id, search=f"#{file_key}", limit=2):
+                    if msg and msg.media:
+                        sz = msg.file.size if getattr(msg, "file", None) else file_size
+                        fn = msg.file.name if getattr(msg, "file", None) and msg.file.name else file_name
+                        await self.save_cached_file(file_key, fn or "media", sz, channel_id, msg.id)
+                        return channel_id, msg.id
+
+            # 2B. Search by exact byte size tag (#sz_<bytes>) — Rule 1: Same file with different name
+            if file_size > 0:
+                async for msg in client.iter_messages(channel_id, search=f"#sz_{file_size}", limit=2):
+                    if msg and msg.media:
+                        fn = msg.file.name if getattr(msg, "file", None) and msg.file.name else file_name
+                        fk = file_key or f"sz_{file_size}"
+                        await self.save_cached_file(fk, fn or "media", file_size, channel_id, msg.id)
+                        return channel_id, msg.id
+
+            # 2C. Fallback search by filename stem
+            if file_name and len(file_name.strip()) > 3:
+                clean_stem = file_name.rsplit(".", 1)[0] if "." in file_name else file_name
+                search_term = re.sub(r"[^\w\s]", " ", clean_stem).strip()
+                if len(search_term) >= 3:
+                    words = search_term.split()
+                    query = words[0] if len(words[0]) >= 4 else (search_term[:20])
+                    async for msg in client.iter_messages(channel_id, search=query, limit=4):
+                        if not msg or not msg.media:
+                            continue
+                        msg_size = msg.file.size if getattr(msg, "file", None) else 0
+                        caption = msg.text or msg.message or ""
+                        m_sz = re.search(r"#sz_(\d+)", caption)
+                        if m_sz:
+                            msg_size = int(m_sz.group(1))
+
+                        # Rule 1 & 2: Verify size match (Different size = Different file!)
+                        if file_size > 0 and msg_size == file_size:
+                            fk = file_key or f"sz_{file_size}"
+                            await self.save_cached_file(fk, file_name, file_size, channel_id, msg.id)
+                            return channel_id, msg.id
+
+                        if file_size > 0 and msg_size > 0 and abs(msg_size - file_size) < 3 * 1024 * 1024:
+                            fk = file_key or f"sz_{file_size}"
+                            await self.save_cached_file(fk, file_name, file_size, channel_id, msg.id)
+                            return channel_id, msg.id
+
+        except Exception as search_err:
+            logger.debug(f"Telegram server-side search notice ({file_name}): {search_err}")
+
+        return None
+
+    async def sync_channel_cache(self, client, channel_id: Optional[int], limit: int = 500, force: bool = False):
         """Index recent Storage Channel media messages into SQLite cache for 0-second matching."""
         if not channel_id or not client:
             return
@@ -209,19 +308,20 @@ class Database:
                     f_name = msg.file.name if getattr(msg, "file", None) else ""
                     f_size = msg.file.size if getattr(msg, "file", None) else 0
 
-                    # If f_name is missing (standard for Telegram video uploads), extract from caption
+                    # Extract #sz_ tag if present in caption
+                    m_sz = re.search(r"#sz_(\d+)", caption)
+                    if m_sz:
+                        f_size = int(m_sz.group(1))
+
                     if not f_name and caption:
-                        # 1. Backtick extraction: `filename.mp4`
                         m_code = re.search(r"[`'\"]([^`'\"]+\.[a-zA-Z0-9]{2,5})[`'\"]", caption)
                         if m_code:
                             f_name = m_code.group(1).strip()
                         else:
-                            # 2. Icon pattern: 🎬 filename.mp4 or 📄 filename.ext
                             m_icon = re.search(r"(?:🎬|🖼️|📄|📁)\s*([^\n\r()]+?\.[a-zA-Z0-9]{2,5})", caption)
                             if m_icon:
                                 f_name = m_icon.group(1).strip()
                             else:
-                                # 3. Common media extension
                                 m_ext = re.search(
                                     r"([a-zA-Z0-9_\-\.\s]+\.(?:mp4|mkv|avi|mov|wmv|flv|webm|jpg|jpeg|png|zip|rar|tar))",
                                     caption,
@@ -230,12 +330,11 @@ class Database:
                                 if m_ext:
                                     f_name = m_ext.group(1).strip()
 
-                    # Extract node hashtag key (e.g. #mg_w21kxbCB or #tb_12345)
                     m_tag = re.search(r"#(mg_[a-zA-Z0-9_\-]+|tb_[a-zA-Z0-9_\-]+)", caption)
                     file_key = m_tag.group(1) if m_tag else None
 
-                    if not file_key and f_name and f_size > 0:
-                        file_key = f"name_{f_name.lower().strip()}_{f_size}"
+                    if not file_key and f_size > 0:
+                        file_key = f"sz_{f_size}"
 
                     if file_key:
                         await self.save_cached_file(file_key, f_name or "media", f_size, channel_id, msg.id)
@@ -246,8 +345,8 @@ class Database:
             except Exception as e:
                 logger.debug(f"Storage channel cache sync notice: {e}")
 
-    async def ensure_channel_synced(self, client, channel_id: Optional[int], limit: int = 1000):
-        """Ensure storage channel has been indexed into SQLite before running pre-check."""
+    async def ensure_channel_synced(self, client, channel_id: Optional[int], limit: int = 500):
+        """Ensure recent storage channel records are cached in SQLite for instant local hits."""
         if channel_id and not self.is_channel_synced:
             await self.sync_channel_cache(client, channel_id, limit=limit)
 
@@ -255,40 +354,50 @@ class Database:
         self, client, channel_id: Optional[int], nodes: list[dict]
     ) -> tuple[list[dict], list[dict]]:
         """
-        Upfront 0-bandwidth batch partitioner.
-        Checks all Mega nodes against Storage Channel cache:
-        Returns:
-            missing_nodes: list of nodes that MUST be downloaded from Mega servers.
-            cached_nodes: list of nodes already in Storage Channel (Zero download needed!).
+        Upfront 0-bandwidth batch partitioner with Proposal 2 (Telegram Server Search)
+        and Proposal 3 (In-Folder Internal Deduplication & Exact-Size Matching).
         """
         if not nodes:
             return [], []
 
-        if channel_id:
-            await self.ensure_channel_synced(client, channel_id)
-
         missing_nodes = []
         cached_nodes = []
 
+        # --- STEP 1: IN-FOLDER INTERNAL DEDUPLICATION (Proposal 3 Rule 3) ---
+        # Eliminate identical size duplicate copies within the same incoming share
+        seen_sizes = {}
+        deduped_nodes = []
         for node in nodes:
+            sz = node.get("size", 0)
+            if sz > 0 and sz in seen_sizes:
+                logger.info(
+                    f"In-folder duplicate detected: '{node.get('name')}' shares size {sz} bytes with '{seen_sizes[sz]}' (Skipping duplicate download)"
+                )
+                cached_nodes.append(node)
+                continue
+            if sz > 0:
+                seen_sizes[sz] = node.get("name", "")
+            deduped_nodes.append(node)
+
+        # Warm up local cache with recent messages if channel provided
+        if channel_id:
+            await self.ensure_channel_synced(client, channel_id, limit=200)
+
+        # --- STEP 2: MULTI-TIER SEARCH AGAINST STORAGE CHANNEL ---
+        for node in deduped_nodes:
             h = node.get("h", "")
             name = node.get("name", "")
             size = node.get("size", 0)
 
-            # 1. Exact node key match (mg_<h>)
-            matched = False
-            if h:
-                cached = await self.get_cached_file(f"mg_{h}")
-                if cached:
-                    matched = True
+            hit = await self.search_channel_media(
+                client=client,
+                channel_id=channel_id,
+                file_key=f"mg_{h}" if h else "",
+                file_name=name,
+                file_size=size,
+            )
 
-            # 2. Match by filename and size in SQLite
-            if not matched and name:
-                cached_by_name = await self.get_cached_file_by_name_size(name, size)
-                if cached_by_name:
-                    matched = True
-
-            if matched:
+            if hit:
                 cached_nodes.append(node)
             else:
                 missing_nodes.append(node)
@@ -304,67 +413,31 @@ class Database:
         file_size: int = 0,
     ):
         """
-        Search for a media item in local SQLite or the remote Storage Channel.
-        Supports:
-        1. Exact file_key in local SQLite cache (instant O(1))
-        2. Name + Size in local SQLite cache (instant O(1))
-        3. Fallback sync if channel cache was not loaded yet
+        Search for a media item in local SQLite or via Telegram Server Deep Search.
+        Returns Message object if found, or None.
         """
-        if not file_key and not file_name:
+        if not channel_id or not client:
             return None
 
-        # 1. Check local SQLite cache by file_key (instant 0 ms)
-        if file_key:
-            cached = await self.get_cached_file(file_key)
-            if cached:
-                c_id, msg_id = cached
-                try:
-                    msg = await client.get_messages(c_id, ids=msg_id)
-                    if msg and msg.media:
-                        return msg
-                except Exception as e:
-                    logger.debug(f"Could not fetch cached message {msg_id} from {c_id}: {e}")
-
-        # 2. Check local SQLite cache by name & size (instant 0 ms)
-        if file_name:
-            cached_by_name = await self.get_cached_file_by_name_size(file_name, file_size)
-            if cached_by_name:
-                c_id, msg_id = cached_by_name
-                try:
-                    msg = await client.get_messages(c_id, ids=msg_id)
-                    if msg and msg.media:
-                        return msg
-                except Exception as e:
-                    logger.debug(f"Could not fetch cached message {msg_id} from {c_id}: {e}")
-
-        # 3. If still not found and channel has not been synced, sync once and retry
-        if channel_id and not self.is_channel_synced:
-            await self.ensure_channel_synced(client, channel_id)
-
-            if file_key:
-                cached = await self.get_cached_file(file_key)
-                if cached:
-                    c_id, msg_id = cached
-                    try:
-                        msg = await client.get_messages(c_id, ids=msg_id)
-                        if msg and msg.media:
-                            return msg
-                    except Exception:
-                        pass
-
-            if file_name:
-                cached_by_name = await self.get_cached_file_by_name_size(file_name, file_size)
-                if cached_by_name:
-                    c_id, msg_id = cached_by_name
-                    try:
-                        msg = await client.get_messages(c_id, ids=msg_id)
-                        if msg and msg.media:
-                            return msg
-                    except Exception:
-                        pass
+        hit = await self.search_channel_media(
+            client=client,
+            channel_id=channel_id,
+            file_key=file_key,
+            file_name=file_name,
+            file_size=file_size,
+        )
+        if hit:
+            c_id, msg_id = hit
+            try:
+                msg = await client.get_messages(c_id, ids=msg_id)
+                if msg and msg.media:
+                    return msg
+            except Exception as e:
+                logger.debug(f"Could not retrieve message {msg_id} from {c_id}: {e}")
 
         return None
 
 
 db = Database()
+
 

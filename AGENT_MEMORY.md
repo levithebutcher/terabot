@@ -95,12 +95,10 @@ flowchart TD
 ```
 
 #### Multi-Layer Match Criteria:
-1. **Hashtag Key**: Matches `#mg_<node_h>` in message captions.
-2. **Caption Filename Extraction**: Telegram video documents often have `msg.file.name = None`. The engine parses the caption with regex:
-   - Backticks: `` `([^\`\n]+\.[a-zA-Z0-9]{2,5})` ``
-   - Icons: `(?:🎬|🖼️|📄|📁)\s*([^\n\r()]+?\.[a-zA-Z0-9]{2,5})`
-   - File extensions: `.mp4`, `.mkv`, `.mov`, etc.
-3. **Byte Size Tolerance**: Matches file size within ±3 MB tolerance to accommodate minor container metadata differences.
+1. **Server-Side Native Search & Hashtag Key**: Matches `#mg_<node_h>` or `#tb_<fs_id>` directly in the channel via Telegram's server search (no 100/1000 message scan limit, works across Colab restarts & Railway).
+2. **Exact Byte Size Tag (`#sz_<bytes>`)**: Matches exact integer byte size in captions. Even if a file is renamed across folders, identical byte count triggers an instant skip!
+3. **Caption Filename Extraction & Tolerance**: Telegram video documents often have `msg.file.name = None`. The engine parses captions with regex and matches size within ±3 MB tolerance. If names match but sizes are significantly different, the engine downloads the file (e.g. 720p vs 1080p).
+4. **In-Folder Pre-De-duplication**: Identical files inside the same Mega share are de-duplicated upfront so only one copy is downloaded.
 
 ---
 
@@ -128,6 +126,8 @@ User settings are stored in SQLite `user_settings` table:
 
 Users can toggle modes via `/delivery channel`, `/delivery both`, or interactive inline buttons:
 `[ 🛡️ Channel Only (Vault) ]` | `[ 📬 Channel + Bot DM ]`
+And directly inside the **Mega Subfolder Explorer & Global Hub** via a 1-tap quick toggle:
+`[ 🛡️ Mode: Channel Only (Vault) 🔄 ]` / `[ 📬 Mode: Channel + Bot DM 🔄 ]`
 
 ---
 
