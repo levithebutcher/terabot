@@ -75,6 +75,10 @@ DOWNLOAD_DIR=downloads
    - All files must be archived to this channel.
 4. **Zero-Bandwidth Deduplication Mandate**:
    - If a file is already in the storage channel, the bot must **NEVER download it from Mega or TeraBox servers**. It must be skipped upfront before stream connections are opened.
+5. **Local Device Only for Prefilled Notebooks (STRICT GIT PRIVACY RULE)**:
+   - When the user asks for prefilled Colab notebooks, **NEVER push real credentials to GitHub!**
+   - The git-tracked notebook `terabot_v3_colab.ipynb` must ALWAYS have safe dummy placeholders (`YOUR_BOT_TOKEN_HERE`, etc.).
+   - Prefilled notebooks must strictly stay on the local device as `*_prefilled.ipynb` (protected by `.gitignore`).
 
 ---
 
