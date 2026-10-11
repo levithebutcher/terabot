@@ -53,10 +53,19 @@ def make_stop_btn(user_id: int):
     return [[Button.inline("🛑 Abort Task", data=f"stop:{user_id}")]]
 
 
-def render_mega_progress(action: str, name: str, current: int, total: int, speed: float) -> str:
-    """Render a clean progress bar string matching the bot's visual theme."""
+def render_mega_progress(
+    action: str,
+    name: str,
+    current: int,
+    total: int,
+    speed: float,
+    folder_header: str = "",
+) -> str:
+    """Render a clean progress bar string matching the bot's visual theme without broken markdown tags."""
     bar_width = 12
     speed_mb = speed / (1024 * 1024) if speed > 0 else 0.0
+    header_block = f"{folder_header.strip()}\n\n" if folder_header.strip() else ""
+    clean_action = action.replace("**", "").strip()
 
     if total > 0:
         percent = (current / total) * 100.0
@@ -66,7 +75,8 @@ def render_mega_progress(action: str, name: str, current: int, total: int, speed
         eta = remaining / speed if speed > 0 else 0
         eta_str = format_duration(eta)
         return (
-            f"**{action}**: `{name}`\n\n"
+            f"{header_block}"
+            f"**{clean_action}**: `{name}`\n\n"
             f"[{bar}] **{percent:.1f}%**\n"
             f"⚡ **Speed**: `{speed_mb:.2f} MB/s`\n"
             f"📦 **Processed**: `{format_bytes(current)}` / `{format_bytes(total)}`\n"
@@ -74,11 +84,13 @@ def render_mega_progress(action: str, name: str, current: int, total: int, speed
         )
     else:
         return (
-            f"**{action}**: `{name}`\n\n"
+            f"{header_block}"
+            f"**{clean_action}**: `{name}`\n\n"
             f"⚡ **Speed**: `{speed_mb:.2f} MB/s`\n"
             f"📦 **Downloaded**: `{format_bytes(current)}`\n"
             f"⏳ **Status**: `Streaming high-speed chunks from Mega...`"
         )
+
 
 
 def sanitize_filename(name: str) -> str:
@@ -547,7 +559,27 @@ class MegaExplorerManager:
         except Exception:
             pass
 
-    async def render_explorer(self, sess: MegaSession, page: int = 0):
+    async def safe_edit_view(
+        self,
+        sess: MegaSession,
+        text: str,
+        buttons=None,
+        event: Optional[events.CallbackQuery.Event] = None,
+    ):
+        """Safely edit explorer message via callback event or original status message without throwing."""
+        if event and hasattr(event, "edit"):
+            try:
+                await event.edit(text, buttons=buttons)
+                return
+            except Exception:
+                pass
+        if sess and sess.status_msg:
+            try:
+                await sess.status_msg.edit(text, buttons=buttons)
+            except Exception:
+                pass
+
+    async def render_explorer(self, sess: MegaSession, page: int = 0, event=None):
         """Render paginated folder buttons list (6 folders per page)."""
         sess.last_active = time.time()
         sess.current_dir_h = None
@@ -596,22 +628,19 @@ class MegaExplorerManager:
         # Action row
         buttons.append([
             Button.inline("🔍 Search by Name", data=f"m_srch:{sess.session_id}"),
-            Button.inline("🌐 Global Download", data=f"m_home:{sess.session_id}"),
+            Button.inline("🌐 Global Download Hub", data=f"m_home:{sess.session_id}"),
         ])
         buttons.append([Button.inline("❌ Cancel", data=f"m_cancel:{sess.session_id}")])
 
-        try:
-            await sess.status_msg.edit(text, buttons=buttons)
-        except Exception:
-            pass
+        await self.safe_edit_view(sess, text, buttons, event=event)
 
-    async def render_folder_details(self, sess: MegaSession, dir_h: str):
+    async def render_folder_details(self, sess: MegaSession, dir_h: str, event=None):
         """Render breakdown (videos vs photos) for a selected subfolder with selective download buttons."""
         sess.last_active = time.time()
         sess.current_dir_h = dir_h
         d = sess.folder_info["dirs"].get(dir_h)
         if not d:
-            await self.render_explorer(sess, page=sess.current_page)
+            await self.render_explorer(sess, page=sess.current_page, event=event)
             return
 
         folder_name = d["name"]
@@ -655,15 +684,12 @@ class MegaExplorerManager:
 
         buttons.append([
             Button.inline("🔙 Back to Subfolders", data=f"m_nav:{sess.session_id}:{sess.current_page}"),
-            Button.inline("❌ Cancel", data=f"m_cancel:{sess.session_id}"),
-        ])
+            Button.inline("❌ Cancel", data=f"m_cancel:{sess.session_id}")],
+        )
 
-        try:
-            await sess.status_msg.edit(text, buttons=buttons)
-        except Exception:
-            pass
+        await self.safe_edit_view(sess, text, buttons, event=event)
 
-    async def render_search_results(self, sess: MegaSession):
+    async def render_search_results(self, sess: MegaSession, event=None):
         """Render results from keyword search."""
         sess.last_active = time.time()
         matches = sess.search_results or []
@@ -678,10 +704,7 @@ class MegaExplorerManager:
                 [Button.inline("🔙 Back to All Folders", data=f"m_nav:{sess.session_id}:0")],
                 [Button.inline("❌ Cancel", data=f"m_cancel:{sess.session_id}")],
             ]
-            try:
-                await sess.status_msg.edit(text, buttons=buttons)
-            except Exception:
-                pass
+            await self.safe_edit_view(sess, text, buttons, event=event)
             return
 
         text = (
@@ -704,12 +727,9 @@ class MegaExplorerManager:
         ])
         buttons.append([Button.inline("❌ Cancel", data=f"m_cancel:{sess.session_id}")])
 
-        try:
-            await sess.status_msg.edit(text, buttons=buttons)
-        except Exception:
-            pass
+        await self.safe_edit_view(sess, text, buttons, event=event)
 
-    async def render_home(self, sess: MegaSession):
+    async def render_home(self, sess: MegaSession, event=None):
         """Render global view of the entire share."""
         sess.last_active = time.time()
         info = sess.folder_info
@@ -729,28 +749,31 @@ class MegaExplorerManager:
             f"📊 **Total Content**: `{num_folders} Subfolders` • `{tot_files} Files` • `{tot_size}`\n"
             f"• 🎬 **All Videos**: `{num_v} Files` (~`{v_sz}`)\n"
             f"• 🖼️ **All Photos**: `{num_p} Files` (~`{p_sz}`)\n\n"
-            f"💡 _Tip: Specific subfolders chunna fast aur reliable download deta hai._\n\n"
-            f"👇 **Choose an option:**"
+            f"📁 *Folder-by-Folder Sequential Mode: Pehle Folder 1 pura hoga, fir Folder 2!*\n\n"
+            f"👇 **Neeche option chunne par direct sequential download shuru hoga:**"
         )
 
         buttons = [
-            [Button.inline(f"🗂️ Browse Subfolders ({num_folders})", data=f"m_nav:{sess.session_id}:0")],
-            [Button.inline("🔍 Search by Name / Keyword", data=f"m_srch:{sess.session_id}")],
+            [Button.inline(f"🎬 Download All Videos ({num_v}) [Sequential]", data=f"m_allact:{sess.session_id}:video")],
+            [Button.inline(f"📁 Download Everything ({tot_files}) [Sequential]", data=f"m_allact:{sess.session_id}:all")],
             [
-                Button.inline(f"🎬 All Videos ({num_v})", data=f"m_allact:{sess.session_id}:video"),
-                Button.inline(f"🖼️ All Photos ({num_p})", data=f"m_allact:{sess.session_id}:photo"),
+                Button.inline(f"🖼️ Photos ({num_p})", data=f"m_allact:{sess.session_id}:photo"),
+                Button.inline("🔍 Search Folder", data=f"m_srch:{sess.session_id}"),
             ],
-            [Button.inline(f"📁 Download Entire Share ({tot_files})", data=f"m_allact:{sess.session_id}:all")],
+            [Button.inline(f"🗂️ Browse Subfolders ({num_folders})", data=f"m_nav:{sess.session_id}:0")],
             [Button.inline("❌ Cancel", data=f"m_cancel:{sess.session_id}")],
         ]
 
-        try:
-            await sess.status_msg.edit(text, buttons=buttons)
-        except Exception:
-            pass
+        await self.safe_edit_view(sess, text, buttons, event=event)
 
     async def handle_callback(self, event: events.CallbackQuery.Event, client, active_tasks: dict):
         """Unified callback handler for all Mega explorer events."""
+        # 1. Immediately acknowledge Telegram callback so loading spinner clears
+        try:
+            await event.answer()
+        except Exception:
+            pass
+
         data = event.data.decode("utf-8")
         parts = data.split(":")
         action_prefix = parts[0]
@@ -758,28 +781,31 @@ class MegaExplorerManager:
 
         sess = self.get_session(sess_id)
         if not sess:
-            await event.answer("⚠️ Session expired (30 min)! Please resend the link.", alert=True)
+            try:
+                await event.answer("⚠️ Session expired (30 min)! Please resend the link.", alert=True)
+            except Exception:
+                pass
             return
 
         if event.sender_id != sess.user_id:
-            await event.answer("⛔ This session is for another user!", alert=True)
+            try:
+                await event.answer("⛔ This session is for another user!", alert=True)
+            except Exception:
+                pass
             return
 
         sess.last_active = time.time()
 
         if action_prefix == "m_nav":
             page = int(parts[2]) if len(parts) > 2 else 0
-            await self.render_explorer(sess, page=page)
-            await event.answer()
+            await self.render_explorer(sess, page=page, event=event)
 
         elif action_prefix == "m_dir":
             dir_h = parts[2]
-            await self.render_folder_details(sess, dir_h)
-            await event.answer()
+            await self.render_folder_details(sess, dir_h, event=event)
 
         elif action_prefix == "m_home":
-            await self.render_home(sess)
-            await event.answer()
+            await self.render_home(sess, event=event)
 
         elif action_prefix == "m_srch":
             sess.awaiting_search = True
@@ -791,35 +817,39 @@ class MegaExplorerManager:
                 [Button.inline("🔙 Back to Explorer", data=f"m_nav:{sess.session_id}:{sess.current_page}")],
                 [Button.inline("❌ Cancel", data=f"m_cancel:{sess.session_id}")],
             ]
-            await sess.status_msg.edit(text, buttons=buttons)
-            await event.answer("🔍 Type keyword in chat!")
+            await self.safe_edit_view(sess, text, buttons, event=event)
 
         elif action_prefix == "m_cancel":
             if not sess.future.done():
                 sess.future.set_result(("cancel", None))
-            await event.answer("❌ Cancelled")
-            try:
-                await sess.status_msg.edit("❌ **Mega exploration cancelled by user.**", buttons=None)
-            except Exception:
-                pass
+            await self.safe_edit_view(sess, "❌ **Mega exploration cancelled by user.**", None, event=event)
 
         elif action_prefix == "m_act":
             dir_h = parts[2]
             act_type = parts[3]
             label_map = {"video": "Videos", "photo": "Photos", "other": "Others", "all": "Full Folder"}
-            await event.answer(f"🚀 Starting {label_map.get(act_type, 'Files')} download...")
+            try:
+                await event.answer(f"🚀 Starting {label_map.get(act_type, 'Files')} download...")
+            except Exception:
+                pass
             if not sess.future.done():
                 sess.future.set_result((act_type, dir_h))
 
         elif action_prefix == "m_allact":
             act_type = parts[2]
             label_map = {"video": "All Videos", "photo": "All Photos", "all": "Everything"}
-            await event.answer(f"🚀 Starting {label_map.get(act_type, 'Files')} download...")
+            try:
+                await event.answer(f"🚀 Starting {label_map.get(act_type, 'Files')} download...")
+            except Exception:
+                pass
             if not sess.future.done():
                 sess.future.set_result((act_type, None))
 
         elif action_prefix == "m_reopen":
-            await event.answer("🔄 Reopening Mega Subfolder Explorer...")
+            try:
+                await event.answer("🔄 Reopening Mega Subfolder Explorer...")
+            except Exception:
+                pass
             # Reopen session for downloading another folder from the same link
             sess.future = asyncio.get_running_loop().create_future()
             sess.status_msg = await event.reply("🔍 **Loading Mega Subfolder Explorer...**", buttons=make_stop_btn(sess.user_id))
@@ -834,6 +864,7 @@ class MegaExplorerManager:
                 )
             )
             active_tasks[sess.user_id] = task
+
 
 
 mega_mgr = MegaExplorerManager()
@@ -903,16 +934,27 @@ async def execute_session_download(
         return
 
     # Execute stream download & upload
-    await stream_and_upload_nodes(
-        event=event,
-        folder_info=folder_info,
-        selected_nodes=selected_nodes,
-        status_msg=status_msg,
-        user_id=user_id,
-        folder_name=folder_display_name,
-        filter_mode=chosen_action,
-        sess_id=sess.session_id,
-    )
+    try:
+        await stream_and_upload_nodes(
+            event=event,
+            folder_info=folder_info,
+            selected_nodes=selected_nodes,
+            status_msg=status_msg,
+            user_id=user_id,
+            folder_name=folder_display_name,
+            filter_mode=chosen_action,
+            sess_id=sess.session_id,
+        )
+    except Exception as e:
+        logger.error(f"Error executing stream download in session: {e}", exc_info=True)
+        try:
+            await status_msg.edit(
+                f"❌ **Transfer Error**: `{str(e)}`\n\n"
+                "💡 _Aap `/delivery` se mode check kar sakte hain ya link dobara send kar sakte hain._",
+                buttons=[[Button.inline("🔙 Try Again", data=f"m_reopen:{sess.session_id}")]],
+            )
+        except Exception:
+            pass
 
 
 async def stream_and_upload_nodes(
@@ -961,13 +1003,16 @@ async def stream_and_upload_nodes(
         if total_folders > 1:
             folder_overview += f"\n📁 **Folders**: `{total_folders}` (Sequential Folder-by-Folder)"
 
-        await status_msg.edit(
-            f"🚀 **Starting Mega Download...**\n"
-            f"{folder_overview}\n"
-            f"📦 **Selected**: `{total_selected} Files` • `{format_bytes(total_selected_size)}`\n"
-            "⏳ *Processing folder-by-folder with high-speed direct streaming...*",
-            buttons=make_stop_btn(user_id),
-        )
+        try:
+            await status_msg.edit(
+                f"🚀 **Starting Mega Download...**\n"
+                f"{folder_overview}\n"
+                f"📦 **Selected**: `{total_selected} Files` • `{format_bytes(total_selected_size)}`\n"
+                "⏳ *Processing folder-by-folder with high-speed direct streaming...*",
+                buttons=make_stop_btn(user_id),
+            )
+        except Exception:
+            pass
         await asyncio.sleep(1.0)
 
         uploader = TelethonUploader(event.client)
@@ -1028,7 +1073,10 @@ async def stream_and_upload_nodes(
                 )
                 # Mode B: Forward to user DM if target is storage channel and user wants DM delivery
                 if config.PRIVATE_CHAT_ID and msgs and delivery_mode == "both":
-                    await event.client.forward_messages(event.chat_id, msgs)
+                    try:
+                        await event.client.forward_messages(event.chat_id, msgs)
+                    except Exception as fwd_err:
+                        logger.warning(f"Could not forward album to user chat: {fwd_err}")
 
                 # Save cache records for each uploaded album item
                 if msgs and isinstance(msgs, list):
@@ -1064,7 +1112,10 @@ async def stream_and_upload_nodes(
                             workers=10,
                         )
                         if config.PRIVATE_CHAT_ID and sent and delivery_mode == "both":
-                            await event.client.forward_messages(event.chat_id, sent)
+                            try:
+                                await event.client.forward_messages(event.chat_id, sent)
+                            except Exception as fwd_err:
+                                logger.warning(f"Could not forward fallback to user chat: {fwd_err}")
                         if sent and k:
                             await db.save_cached_file(k, p.name, sz, target_chat_id, sent.id)
                             uploaded_count += 1
@@ -1141,9 +1192,10 @@ async def stream_and_upload_nodes(
                         skipped_count += 1
                         skipped_size += file_size
                         # Silent Skip: Do NOT forward to user's chat! Just update progress card.
+                        skip_header = f"{folder_header.strip()}\n\n" if folder_header.strip() else ""
                         skip_txt = (
-                            f"{folder_header}"
-                            f"⚡ {file_prefix}**Skipped (Already in Storage)**\n\n"
+                            f"{skip_header}"
+                            f"⚡ **{file_prefix}Skipped (Already in Storage)**\n\n"
                             f"🎬 `{file_name}`\n"
                             f"⏩ File pehle se storage channel mein hai — direct skip!"
                         )
@@ -1185,11 +1237,12 @@ async def stream_and_upload_nodes(
                         if now - last_dl_edit >= 2.0 or current == total:
                             last_dl_edit = now
                             txt = render_mega_progress(
-                                action=f"{folder_header}📥 {file_prefix}Downloading from Mega",
+                                action=f"📥 {file_prefix}Downloading from Mega",
                                 name=file_name,
                                 current=current,
                                 total=total,
                                 speed=speed,
+                                folder_header=folder_header,
                             )
                             try:
                                 await status_msg.edit(txt, buttons=make_stop_btn(user_id))
@@ -1255,11 +1308,12 @@ async def stream_and_upload_nodes(
                         if now - last_upload_edit >= 2.0 or current == total:
                             last_upload_edit = now
                             txt = render_mega_progress(
-                                action=f"{folder_header}📤 {file_prefix}Uploading to Telegram",
+                                action=f"📤 {file_prefix}Uploading to Telegram",
                                 name=dest_path.name,
                                 current=current,
                                 total=total,
                                 speed=speed,
+                                folder_header=folder_header,
                             )
                             try:
                                 await status_msg.edit(txt, buttons=make_stop_btn(user_id))
@@ -1279,7 +1333,10 @@ async def stream_and_upload_nodes(
 
                     if sent_msg:
                         if config.PRIVATE_CHAT_ID and delivery_mode == "both":
-                            await event.client.forward_messages(event.chat_id, sent_msg)
+                            try:
+                                await event.client.forward_messages(event.chat_id, sent_msg)
+                            except Exception as fwd_err:
+                                logger.warning(f"Could not forward media to user chat: {fwd_err}")
                         await db.save_cached_file(file_key, dest_path.name, actual_size, target_chat_id, sent_msg.id)
                         uploaded_count += 1
                         uploaded_size += actual_size

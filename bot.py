@@ -633,7 +633,10 @@ async def process_terabox_link(
                     workers=10,
                 )
                 if config.PRIVATE_CHAT_ID and msgs and delivery_mode == "both":
-                    await client.forward_messages(event.chat_id, msgs)
+                    try:
+                        await client.forward_messages(event.chat_id, msgs)
+                    except Exception as fwd_err:
+                        logger.warning(f"Could not forward album to user chat: {fwd_err}")
 
                 # Save cache for album items
                 if msgs and isinstance(msgs, list):
@@ -667,7 +670,10 @@ async def process_terabox_link(
                             workers=10,
                         )
                         if config.PRIVATE_CHAT_ID and sent and delivery_mode == "both":
-                            await client.forward_messages(event.chat_id, sent)
+                            try:
+                                await client.forward_messages(event.chat_id, sent)
+                            except Exception as fwd_err:
+                                logger.warning(f"Could not forward fallback upload to user chat: {fwd_err}")
                         if sent and k:
                             await db.save_cached_file(k, p.name, sz, target_chat_id, sent.id)
                             uploaded_count += 1
@@ -797,7 +803,10 @@ async def process_terabox_link(
                     )
                     if sent_msg:
                         if config.PRIVATE_CHAT_ID and delivery_mode == "both":
-                            await client.forward_messages(event.chat_id, sent_msg)
+                            try:
+                                await client.forward_messages(event.chat_id, sent_msg)
+                            except Exception as fwd_err:
+                                logger.warning(f"Could not forward to user chat: {fwd_err}")
                         await db.save_cached_file(file_key, file_obj.file_name, file_obj.size, target_chat_id, sent_msg.id)
                         uploaded_count += 1
                         uploaded_size += file_obj.size
@@ -964,6 +973,7 @@ async def handle_incoming_message(event: events.NewMessage.Event):
             config.PRIVATE_CHAT_ID = event.chat_id
             update_env_file("PRIVATE_CHAT_ID", str(event.chat_id))
             logger.info(f"Auto-detected storage channel ID: {event.chat_id}")
+            asyncio.create_task(db.sync_channel_cache(client, event.chat_id))
             if config.ADMIN_IDS:
                 try:
                     await client.send_message(
@@ -1012,6 +1022,7 @@ async def handle_incoming_message(event: events.NewMessage.Event):
                 full_chat_id = int(f"-100{fwd_channel_id}") if not str(fwd_channel_id).startswith("-100") else int(fwd_channel_id)
                 config.PRIVATE_CHAT_ID = full_chat_id
                 update_env_file("PRIVATE_CHAT_ID", str(full_chat_id))
+                asyncio.create_task(db.sync_channel_cache(client, full_chat_id))
                 await event.reply(
                     f"✅ **Storage Channel Successfully Connected!**\n\n"
                     f"🆔 **Channel ID**: `{full_chat_id}`\n\n"
@@ -1136,6 +1147,10 @@ async def main():
                 logger.info(f"Bot successfully logged in as @{me.username} (ID: {me.id})")
                 print(f"\n[+] Bot is running as @{me.username} (ID: {me.id})")
                 print("[+] Listening for incoming messages. Press Ctrl+C to stop.\n")
+
+                if config.PRIVATE_CHAT_ID:
+                    logger.info(f"Syncing storage channel cache for {config.PRIVATE_CHAT_ID}...")
+                    asyncio.create_task(db.sync_channel_cache(client, config.PRIVATE_CHAT_ID))
 
             await client.run_until_disconnected()
         except asyncio.CancelledError:

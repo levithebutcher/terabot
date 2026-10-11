@@ -151,6 +151,55 @@ class Database:
             )
             await db.commit()
 
+    async def get_cached_file_by_name_size(self, file_name: str, file_size: int = 0) -> Optional[tuple[int, int]]:
+        """Retrieve (channel_id, message_id) by exact or matching name & size from SQLite cache."""
+        clean_name = file_name.strip().lower()
+        if not clean_name:
+            return None
+        async with aiosqlite.connect(self.db_path) as db:
+            if file_size > 0:
+                async with db.execute(
+                    "SELECT channel_id, message_id, file_size FROM cached_files WHERE LOWER(file_name) = ? OR LOWER(file_name) LIKE ?",
+                    (clean_name, f"%{clean_name}%"),
+                ) as cursor:
+                    rows = await cursor.fetchall()
+                    for c_id, m_id, sz in rows:
+                        if abs(sz - file_size) < 2 * 1024 * 1024:
+                            return int(c_id), int(m_id)
+            else:
+                async with db.execute(
+                    "SELECT channel_id, message_id FROM cached_files WHERE LOWER(file_name) = ?",
+                    (clean_name,),
+                ) as cursor:
+                    row = await cursor.fetchone()
+                    if row:
+                        return int(row[0]), int(row[1])
+        return None
+
+    async def sync_channel_cache(self, client, channel_id: Optional[int], limit: int = 300):
+        """Index recent Storage Channel media messages into SQLite cache for 0-second matching."""
+        if not channel_id:
+            return
+        try:
+            count = 0
+            async for msg in client.iter_messages(channel_id, limit=limit):
+                if not msg or not msg.media:
+                    continue
+                caption = msg.text or msg.message or ""
+                f_name = msg.file.name if getattr(msg, "file", None) else ""
+                f_size = msg.file.size if getattr(msg, "file", None) else 0
+
+                # Check for hashtag key (e.g. #mg_abc123 or #tb_12345)
+                m_tag = re.search(r"#(mg_[a-zA-Z0-9_\-]+|tb_[a-zA-Z0-9_\-]+)", caption)
+                file_key = m_tag.group(1) if m_tag else (f"raw_{abs(hash(f_name + str(f_size)))}" if f_name else None)
+
+                if file_key:
+                    await self.save_cached_file(file_key, f_name or "media", f_size, channel_id, msg.id)
+                    count += 1
+            logger.info(f"Storage channel cache synchronized: {count} media records indexed.")
+        except Exception as e:
+            logger.debug(f"Storage channel cache sync notice: {e}")
+
     async def find_cached_media(
         self,
         client,
@@ -162,14 +211,15 @@ class Database:
         """
         Search for a media item in local SQLite or the remote Storage Channel.
         Supports:
-        1. Exact file_key in local SQLite cache
-        2. Exact hashtag search in channel (#file_key)
-        3. Smart Name & Size fallback (for older files manually forwarded into channel without ID)
+        1. Exact file_key in local SQLite cache (instant O(1))
+        2. Name + Size in local SQLite cache (instant O(1))
+        3. Exact hashtag scan in channel (#file_key)
+        4. Name & Size fallback in channel
         """
         if not file_key and not file_name:
             return None
 
-        # 1. Check local SQLite cache first (super fast)
+        # 1. Check local SQLite cache by file_key (instant 0 ms)
         if file_key:
             cached = await self.get_cached_file(file_key)
             if cached:
@@ -181,43 +231,26 @@ class Database:
                 except Exception as e:
                     logger.debug(f"Could not fetch cached message {msg_id} from {c_id}: {e}")
 
-        # 2. Check remote Storage Channel if channel_id is provided
+        # 2. Check local SQLite cache by name & size (instant 0 ms)
+        if file_name:
+            cached_by_name = await self.get_cached_file_by_name_size(file_name, file_size)
+            if cached_by_name:
+                c_id, msg_id = cached_by_name
+                try:
+                    msg = await client.get_messages(c_id, ids=msg_id)
+                    if msg and msg.media:
+                        return msg
+                except Exception as e:
+                    logger.debug(f"Could not fetch cached message {msg_id} from {c_id}: {e}")
+
+        # 3. Check remote Storage Channel if channel_id is provided
         if channel_id:
             tag = f"#{file_key}" if file_key else ""
-
-            # Check by tag first
-            if tag:
-                try:
-                    async for msg in client.iter_messages(channel_id, search=tag, limit=1):
-                        if msg and msg.media:
-                            f_name = msg.file.name if getattr(msg, "file", None) else ""
-                            f_size = msg.file.size if getattr(msg, "file", None) else 0
-                            await self.save_cached_file(file_key, f_name, f_size, channel_id, msg.id)
-                            return msg
-                except Exception as e:
-                    logger.debug(f"Search in channel failed ({e}), scanning recent messages...")
-
-            # 3. Fallback: Search by file_name for older files forwarded to channel without ID tag
             clean_name = file_name.strip().lower() if file_name else ""
-            if clean_name:
-                try:
-                    async for msg in client.iter_messages(channel_id, search=file_name, limit=5):
-                        if msg and msg.media:
-                            m_name = (msg.file.name or "").lower() if getattr(msg, "file", None) else ""
-                            m_caption = (msg.text or msg.message or "").lower()
-                            m_size = msg.file.size if getattr(msg, "file", None) else 0
-                            if clean_name in m_name or clean_name in m_caption or m_name in clean_name:
-                                if file_size == 0 or abs(m_size - file_size) < 2 * 1024 * 1024:
-                                    logger.info(f"Matched old forwarded file by name: {file_name}")
-                                    if file_key:
-                                        await self.save_cached_file(file_key, file_name, m_size, channel_id, msg.id)
-                                    return msg
-                except Exception:
-                    pass
 
-            # 4. Scan recent channel messages for tag OR filename + size
             try:
-                async for msg in client.iter_messages(channel_id, limit=60):
+                # Scan recent channel messages for tag OR filename + size
+                async for msg in client.iter_messages(channel_id, limit=80):
                     if msg and msg.media:
                         caption = msg.text or msg.message or ""
                         m_name = (msg.file.name or "").lower() if getattr(msg, "file", None) else ""
@@ -230,17 +263,18 @@ class Database:
                             await self.save_cached_file(file_key, f_name, f_size, channel_id, msg.id)
                             return msg
 
-                        # Match older forwarded file by filename & size
+                        # Match by filename & approximate size
                         if clean_name and (clean_name in m_name or clean_name in caption.lower()):
                             if file_size == 0 or abs(m_size - file_size) < 2 * 1024 * 1024:
-                                logger.info(f"Matched old forwarded file from channel history: {file_name}")
+                                logger.info(f"Matched file in storage channel history: {file_name}")
                                 if file_key:
                                     await self.save_cached_file(file_key, file_name, m_size, channel_id, msg.id)
                                 return msg
-            except Exception as e2:
-                logger.debug(f"Recent channel scan failed: {e2}")
+            except Exception as e:
+                logger.debug(f"Storage channel scan notice: {e}")
 
         return None
 
 
 db = Database()
+

@@ -21,6 +21,7 @@ develop-eggs/
 dist/
 downloads/
 temp/
+temp_repo/
 logs/
 
 # Telegram Telethon Sessions
