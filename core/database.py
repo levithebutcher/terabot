@@ -317,34 +317,21 @@ class Database:
         return None
 
     async def get_cached_file_by_name_size(self, file_name: str, file_size: int = 0) -> Optional[tuple[int, int]]:
-        """Retrieve (channel_id, message_id) by matching name & size from MongoDB or SQLite."""
+        """Retrieve (channel_id, message_id) by matching EXACT name & EXACT byte size from MongoDB or SQLite."""
         clean_name = file_name.strip()
         if not clean_name:
             return None
-        stem = clean_name.rsplit(".", 1)[0] if "." in clean_name else clean_name
 
         # Check MongoDB first
         if self.use_mongo:
             try:
-                rgx_clean = re.escape(clean_name)
-                rgx_stem = re.escape(stem) if len(stem) >= 4 else rgx_clean
-                query = {
-                    "$or": [
-                        {"file_name": {"$regex": rgx_clean, "$options": "i"}},
-                        {"file_name": {"$regex": rgx_stem, "$options": "i"}},
-                    ]
-                }
+                rgx_clean = f"^{re.escape(clean_name)}$"
+                query = {"file_name": {"$regex": rgx_clean, "$options": "i"}}
                 if file_size > 0:
-                    cursor = self.mongo_db.files.find(query).limit(10)
-                    docs = await cursor.to_list(length=10)
-                    for doc in docs:
-                        sz = doc.get("file_size", 0)
-                        if abs(sz - file_size) < 3 * 1024 * 1024:
-                            return int(doc["channel_id"]), int(doc["message_id"])
-                else:
-                    doc = await self.mongo_db.files.find_one(query)
-                    if doc and "channel_id" in doc and "message_id" in doc:
-                        return int(doc["channel_id"]), int(doc["message_id"])
+                    query["file_size"] = file_size
+                doc = await self.mongo_db.files.find_one(query)
+                if doc and "channel_id" in doc and "message_id" in doc:
+                    return int(doc["channel_id"]), int(doc["message_id"])
             except Exception as e:
                 logger.debug(f"MongoDB get_cached_file_by_name_size notice: {e}")
 
@@ -352,24 +339,16 @@ class Database:
         async with aiosqlite.connect(self.db_path) as db:
             if file_size > 0:
                 async with db.execute(
-                    """
-                    SELECT channel_id, message_id, file_size, file_name 
-                    FROM cached_files 
-                    WHERE LOWER(file_name) = ? 
-                       OR LOWER(file_name) LIKE ? 
-                       OR ? LIKE '%' || LOWER(file_name) || '%'
-                       OR (LENGTH(?) > 4 AND LOWER(file_name) LIKE '%' || ? || '%')
-                    """,
-                    (clean_name.lower(), f"%{clean_name.lower()}%", clean_name.lower(), stem.lower(), stem.lower()),
+                    "SELECT channel_id, message_id FROM cached_files WHERE LOWER(file_name) = ? AND file_size = ?",
+                    (clean_name.lower(), file_size),
                 ) as cursor:
-                    rows = await cursor.fetchall()
-                    for c_id, m_id, sz, fn in rows:
-                        if abs(sz - file_size) < 3 * 1024 * 1024:
-                            return int(c_id), int(m_id)
+                    row = await cursor.fetchone()
+                    if row:
+                        return int(row[0]), int(row[1])
             else:
                 async with db.execute(
-                    "SELECT channel_id, message_id FROM cached_files WHERE LOWER(file_name) = ? OR LOWER(file_name) LIKE ?",
-                    (clean_name.lower(), f"%{clean_name.lower()}%"),
+                    "SELECT channel_id, message_id FROM cached_files WHERE LOWER(file_name) = ?",
+                    (clean_name.lower(),),
                 ) as cursor:
                     row = await cursor.fetchone()
                     if row:
@@ -387,7 +366,7 @@ class Database:
         """
         Universal Multi-Tier Deduplication:
         Tier 1: Fast Database lookup (MongoDB Atlas / SQLite) (0ms)
-        Tier 2: Telegram Server-Side Native Search (only if client has search permission)
+        Tier 2: Telegram Server-Side Native Search (Strict 0-byte tolerance fallback)
         """
         if not channel_id:
             return None
@@ -398,11 +377,7 @@ class Database:
             if cached:
                 return cached
 
-        if file_size > 0:
-            cached_by_size = await self.get_cached_file_by_exact_size(file_size)
-            if cached_by_size:
-                return cached_by_size
-
+        # Only check by name AND size together (Strict duplicate: exact name + exact bytes)
         if file_name and file_size > 0:
             cached_by_name = await self.get_cached_file_by_name_size(file_name, file_size)
             if cached_by_name:
@@ -422,16 +397,7 @@ class Database:
                         await self.save_cached_file(file_key, fn or "media", sz, channel_id, msg.id)
                         return channel_id, msg.id
 
-            # 2B. Search by exact byte size tag (#sz_<bytes>) — Rule 1: Same file with different name
-            if file_size > 0:
-                async for msg in client.iter_messages(channel_id, search=f"#sz_{file_size}", limit=2):
-                    if msg and msg.media:
-                        fn = msg.file.name if getattr(msg, "file", None) else file_name
-                        fk = file_key or f"sz_{file_size}"
-                        await self.save_cached_file(fk, fn or "media", file_size, channel_id, msg.id)
-                        return channel_id, msg.id
-
-            # 2C. Fallback search by filename stem
+            # 2B. Fallback search by filename stem with exact byte size verification
             if file_name and len(file_name.strip()) > 3:
                 clean_stem = file_name.rsplit(".", 1)[0] if "." in file_name else file_name
                 search_term = re.sub(r"[^\w\s]", " ", clean_stem).strip()
@@ -447,8 +413,8 @@ class Database:
                         if m_sz:
                             msg_size = int(m_sz.group(1))
 
-                        # Verify size match
-                        if file_size > 0 and (msg_size == file_size or abs(msg_size - file_size) < 3 * 1024 * 1024):
+                        # Verify EXACT size match (0-byte tolerance!)
+                        if file_size > 0 and msg_size == file_size:
                             fk = file_key or f"sz_{file_size}"
                             await self.save_cached_file(fk, file_name, file_size, channel_id, msg.id)
                             return channel_id, msg.id
@@ -577,56 +543,49 @@ class Database:
             await self.sync_channel_cache(client, channel_id, limit=limit)
 
     async def partition_nodes_by_cache(
-        self, client, channel_id: Optional[int], nodes: list[dict]
+        self, client, channel_id: Optional[int], nodes: list[dict], progress_callback=None
     ) -> tuple[list[dict], list[dict]]:
         """
-        Upfront 0-bandwidth batch partitioner:
-        1. In-Folder Internal Deduplication (Skip identical file sizes within the same incoming share)
-        2. Database Cache Lookup (MongoDB Atlas + SQLite) - Fast 0ms hits across Railway & Colab!
+        Fast batch cache partitioner with 0-byte strict tolerance:
+        - Exact file_key match OR (Exact file_name AND Exact file_size).
+        - Different files with the same name but different sizes will NEVER be skipped.
+        - Optional progress_callback(checked_count, total_count, cached_count) for live UI updates.
         """
         if not nodes:
             return [], []
 
         missing_nodes = []
         cached_nodes = []
+        total_nodes = len(nodes)
 
-        # --- STEP 1: IN-FOLDER INTERNAL DEDUPLICATION (Proposal 3 Rule 3) ---
-        seen_sizes = {}
-        deduped_nodes = []
-        for node in nodes:
-            sz = node.get("size", 0)
-            if sz > 0 and sz in seen_sizes:
-                logger.info(
-                    f"In-folder duplicate detected: '{node.get('name')}' shares size {sz} bytes with '{seen_sizes[sz]}' (Skipping duplicate download)"
-                )
-                cached_nodes.append(node)
-                continue
-            if sz > 0:
-                seen_sizes[sz] = node.get("name", "")
-            deduped_nodes.append(node)
-
-        # Warm up channel cache if accessible
-        if channel_id:
-            await self.ensure_channel_synced(client, channel_id, limit=200)
-
-        # --- STEP 2: MULTI-TIER SEARCH AGAINST DATABASE & CHANNEL ---
-        for node in deduped_nodes:
+        # Batch lookup in MongoDB or SQLite (fast ~0.05s)
+        for idx, node in enumerate(nodes):
             h = node.get("h", "")
             name = node.get("name", "")
             size = node.get("size", 0)
 
-            hit = await self.search_channel_media(
-                client=client,
-                channel_id=channel_id,
-                file_key=f"mg_{h}" if h else "",
-                file_name=name,
-                file_size=size,
-            )
+            hit = None
+            if channel_id:
+                # 1. Fast DB lookup by immutable Mega node key
+                if h:
+                    hit = await self.get_cached_file(f"mg_{h}")
+                # 2. Strict exact match by name AND exact byte size
+                if not hit and name and size > 0:
+                    hit = await self.get_cached_file_by_name_size(name, size)
 
             if hit:
                 cached_nodes.append(node)
             else:
                 missing_nodes.append(node)
+
+            if progress_callback and (idx % 10 == 0 or idx == total_nodes - 1):
+                try:
+                    if asyncio.iscoroutinefunction(progress_callback):
+                        await progress_callback(idx + 1, total_nodes, len(cached_nodes))
+                    else:
+                        progress_callback(idx + 1, total_nodes, len(cached_nodes))
+                except Exception:
+                    pass
 
         return missing_nodes, cached_nodes
 

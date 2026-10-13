@@ -497,6 +497,7 @@ async def inspect_mega_folder(url: str) -> Optional[dict]:
             "videos": global_videos,
             "photos": global_photos,
             "others": global_others,
+            "nodes": global_videos + global_photos + global_others,
             "total_files": total_files,
             "total_size": total_size,
         }
@@ -748,6 +749,7 @@ class MegaSession:
         self.search_query = None
         self.search_results = []
         self.awaiting_search = False
+        self.sort_mode = "size_desc"  # Default: Largest First (size_desc, size_asc, name_asc)
         self.future = asyncio.get_running_loop().create_future()
 
 
@@ -829,7 +831,7 @@ class MegaExplorerManager:
                 pass
 
     async def render_folder(self, sess: MegaSession, dir_h: Optional[str] = None, page: int = 0, event=None):
-        """Render interactive folder drill-down view showing path, child subfolders, and recursive download options."""
+        """Render interactive folder drill-down view showing path, child subfolders, individual video/file buttons, and sorting."""
         sess.last_active = time.time()
         sess.awaiting_search = False
 
@@ -847,7 +849,6 @@ class MegaExplorerManager:
 
         folder_path = d.get("path") or d["name"]
         active_children = d.get("active_children", [])
-        total_children = len(active_children)
 
         tot_files = d.get("total_files", 0)
         tot_size = format_bytes(d.get("total_size", 0))
@@ -864,13 +865,62 @@ class MegaExplorerManager:
         p_sz = format_bytes(sum(f["size"] for f in photos))
         o_sz = format_bytes(sum(f["size"] for f in others))
 
+        # Direct files in THIS folder
+        direct_vids = d.get("direct_videos", [])
+        direct_photos = d.get("direct_photos", [])
+        direct_others = d.get("direct_others", [])
+        direct_files = list(direct_vids) + list(direct_photos) + list(direct_others)
+
+        # ---------------- SORTING ----------------
+        sort_mode = getattr(sess, "sort_mode", "size_desc")
+        sort_labels = {
+            "size_desc": "Size ⬇️",
+            "size_asc": "Size ⬆️",
+            "name_asc": "Name A-Z",
+        }
+        sort_disp = sort_labels.get(sort_mode, "Size ⬇️")
+
+        if sort_mode == "size_desc":
+            sorted_children = sorted(active_children, key=lambda x: sess.folder_info["dirs"].get(x, {}).get("total_size", 0), reverse=True)
+            sorted_files = sorted(direct_files, key=lambda x: x.get("size", 0), reverse=True)
+        elif sort_mode == "size_asc":
+            sorted_children = sorted(active_children, key=lambda x: sess.folder_info["dirs"].get(x, {}).get("total_size", 0))
+            sorted_files = sorted(direct_files, key=lambda x: x.get("size", 0))
+        else: # name_asc
+            sorted_children = sorted(active_children, key=lambda x: sess.folder_info["dirs"].get(x, {}).get("name", "").lower())
+            sorted_files = sorted(direct_files, key=lambda x: x.get("name", "").lower())
+
+        # Combine child folders + direct files
+        display_items = []
+        for ch_h in sorted_children:
+            ch = sess.folder_info["dirs"].get(ch_h)
+            if ch:
+                display_items.append({
+                    "type": "dir",
+                    "h": ch_h,
+                    "name": ch["name"],
+                    "total_files": ch.get("total_files", 0),
+                    "total_size": ch.get("total_size", 0),
+                })
+        for f in sorted_files:
+            ext = ("." + f["name"].split(".")[-1].lower()) if "." in f.get("name", "") else ""
+            icon = "🎬" if ext in VIDEO_EXTENSIONS else ("🖼️" if ext in IMAGE_EXTENSIONS else "📄")
+            display_items.append({
+                "type": "file",
+                "h": f["h"],
+                "name": f["name"],
+                "size": f.get("size", 0),
+                "icon": icon,
+            })
+
+        # Text card header (Option A: Studio Luxe)
         text = (
-            f"🗂️ **Mega Folder Explorer**\n\n"
+            f"🗂️ **MEGA FOLDER EXPLORER** ──────────────────── `[{sort_disp}]`\n\n"
             f"📁 **Path**: `{folder_path}`\n\n"
-            f"📊 **Content (Includes Subfolders)**:\n"
+            f"📊 **Content Breakdown**:\n"
         )
-        if total_children > 0:
-            text += f"• 📂 **Inner Subfolders**: `{total_children}`\n"
+        if len(active_children) > 0:
+            text += f"• 📂 **Inner Subfolders**: `{len(active_children)} Folders`\n"
         if num_v > 0:
             text += f"• 🎬 **Videos**: `{num_v} Files` (~`{v_sz}`)\n"
         if num_p > 0:
@@ -879,34 +929,38 @@ class MegaExplorerManager:
             text += f"• 📄 **Others**: `{num_o} Files` (~`{o_sz}`)\n"
         text += f"• 💾 **Total**: `{tot_files} Files` • `{tot_size}`\n\n"
 
-        if total_children > 0:
-            text += "👇 **Subfolder chunne ke liye click karo (ya direct download karo):**"
+        if display_items:
+            text += "👇 **Subfolder ya single video/file download karne ke liye click karein:**"
         else:
             text += "👇 **Download karne ke liye option chuno:**"
 
         buttons = []
 
-        # 1. Child Subfolder Buttons (Paginated, 6 per page)
-        if total_children > 0:
-            PAGE_SIZE = 6
-            total_pages = max(1, (total_children + PAGE_SIZE - 1) // PAGE_SIZE)
+        # ---------------- PAGINATION (10 ITEMS PER PAGE) ----------------
+        PAGE_SIZE = 10
+        total_items = len(display_items)
+        if total_items > 0:
+            total_pages = max(1, (total_items + PAGE_SIZE - 1) // PAGE_SIZE)
             page = max(0, min(page, total_pages - 1))
             sess.current_page = page
 
             start_idx = page * PAGE_SIZE
-            end_idx = min(start_idx + PAGE_SIZE, total_children)
-            page_children = active_children[start_idx:end_idx]
+            end_idx = min(start_idx + PAGE_SIZE, total_items)
+            page_items = display_items[start_idx:end_idx]
 
-            for ch_h in page_children:
-                ch = sess.folder_info["dirs"].get(ch_h)
-                if not ch:
-                    continue
-                raw_name = ch["name"]
-                disp_name = (raw_name[:20] + "…") if len(raw_name) > 20 else raw_name
-                tot = ch.get("total_files", 0)
-                sz_str = format_bytes(ch.get("total_size", 0))
-                btn_text = f"📂 {disp_name} ({tot} • {sz_str})"
-                buttons.append([Button.inline(btn_text, data=f"m_cd:{sess.session_id}:{ch_h}")])
+            for item in page_items:
+                if item["type"] == "dir":
+                    raw_name = item["name"]
+                    disp_name = (raw_name[:20] + "…") if len(raw_name) > 20 else raw_name
+                    sz_str = format_bytes(item["total_size"])
+                    btn_text = f"📂 {disp_name} ({item['total_files']} • {sz_str})"
+                    buttons.append([Button.inline(btn_text, data=f"m_cd:{sess.session_id}:{item['h']}")])
+                else:
+                    raw_name = item["name"]
+                    disp_name = (raw_name[:18] + "…") if len(raw_name) > 18 else raw_name
+                    sz_str = format_bytes(item["size"])
+                    btn_text = f"{item['icon']} {disp_name} ({sz_str})"
+                    buttons.append([Button.inline(btn_text, data=f"m_dlf:{sess.session_id}:{item['h']}")])
 
             if total_pages > 1:
                 nav_row = []
@@ -917,7 +971,7 @@ class MegaExplorerManager:
                     nav_row.append(Button.inline("Next ➡️", data=f"m_cpage:{sess.session_id}:{page + 1}"))
                 buttons.append(nav_row)
 
-        # 2. Download Action Buttons for THIS folder (Recursive)
+        # ---------------- BATCH DOWNLOAD BUTTONS (THIS FOLDER) ----------------
         act_row1 = []
         if num_v > 0:
             act_row1.append(Button.inline(f"🎬 Videos ({num_v})", data=f"m_act:{sess.session_id}:{dir_h}:video"))
@@ -931,30 +985,37 @@ class MegaExplorerManager:
             act_row2.append(Button.inline(f"📄 Others ({num_o})", data=f"m_act:{sess.session_id}:{dir_h}:other"))
         if tot_files > 0:
             scope_label = "This Folder" if dir_h != root_h else "Full Share"
-            act_row2.append(Button.inline(f"📁 Download {scope_label} ({tot_files})", data=f"m_act:{sess.session_id}:{dir_h}:all"))
+            act_row2.append(Button.inline(f"⚡ Download {scope_label} ({tot_files} Files • {tot_size})", data=f"m_act:{sess.session_id}:{dir_h}:all"))
         if act_row2:
             buttons.append(act_row2)
 
-        # 3. Hierarchy Navigation Buttons (Up / Parent & Root)
+        # ---------------- CLEAN HIERARCHY NAVIGATION (NO DUPLICATE BUTTONS) ----------------
         parent_h = d.get("p")
         nav_controls = []
-        if parent_h and parent_h in sess.folder_info["dirs"] and dir_h != root_h:
-            nav_controls.append(Button.inline("⬆️ Parent Folder", data=f"m_cd:{sess.session_id}:{parent_h}"))
         if dir_h != root_h:
-            nav_controls.append(Button.inline("🏠 Root Folder", data=f"m_cd:{sess.session_id}:{root_h}"))
+            if parent_h and parent_h in sess.folder_info["dirs"] and parent_h != root_h:
+                # Depth >= 2: Parent is not root!
+                nav_controls.append(Button.inline("⬆️ Up 1 Level", data=f"m_cd:{sess.session_id}:{parent_h}"))
+                nav_controls.append(Button.inline("🏠 Back to Root", data=f"m_cd:{sess.session_id}:{root_h}"))
+            else:
+                # Direct child of root: Show ONLY ONE clean button!
+                nav_controls.append(Button.inline("🏠 Back to Root", data=f"m_cd:{sess.session_id}:{root_h}"))
         if nav_controls:
             buttons.append(nav_controls)
 
-        # 4. Utilities Row (Delivery Mode Toggle & Search)
+        # ---------------- SORT TOGGLE & SEARCH ----------------
+        buttons.append([
+            Button.inline(f"🔀 Sort: [{sort_disp}]", data=f"m_sort:{sess.session_id}"),
+            Button.inline("🔍 Search", data=f"m_srch:{sess.session_id}"),
+        ])
+
+        # ---------------- DELIVERY TOGGLE & CANCEL ----------------
         deliv_mode = await db.get_user_delivery_mode(sess.user_id)
         deliv_label = "🛡️ Mode: Channel Only" if deliv_mode == "channel" else "📬 Mode: Channel + DM"
         buttons.append([
             Button.inline(f"{deliv_label} 🔄", data=f"m_togdeliv:{sess.session_id}"),
-            Button.inline("🔍 Search by Name", data=f"m_srch:{sess.session_id}"),
+            Button.inline("❌ Cancel", data=f"m_cancel:{sess.session_id}"),
         ])
-
-        # 5. Cancel Button
-        buttons.append([Button.inline("❌ Cancel", data=f"m_cancel:{sess.session_id}")])
 
         await self.safe_edit_view(sess, text, buttons, event=event)
 
@@ -1097,6 +1158,30 @@ class MegaExplorerManager:
                 pass
             await self.render_folder(sess, dir_h=sess.current_dir_h, page=sess.current_page, event=event)
 
+        elif action_prefix == "m_sort":
+            curr_sort = getattr(sess, "sort_mode", "size_desc")
+            if curr_sort == "size_desc":
+                sess.sort_mode = "size_asc"
+            elif curr_sort == "size_asc":
+                sess.sort_mode = "name_asc"
+            else:
+                sess.sort_mode = "size_desc"
+            sort_names = {"size_desc": "Size (Largest First)", "size_asc": "Size (Smallest First)", "name_asc": "Name (A-Z)"}
+            try:
+                await event.answer(f"🔀 Sorted by: {sort_names.get(sess.sort_mode)}")
+            except Exception:
+                pass
+            await self.render_folder(sess, dir_h=sess.current_dir_h, page=0, event=event)
+
+        elif action_prefix == "m_dlf":
+            node_h = parts[2]
+            try:
+                await event.answer("🚀 Starting single file download...")
+            except Exception:
+                pass
+            if not sess.future.done():
+                sess.future.set_result(("single", node_h))
+
         elif action_prefix == "m_reopen":
             try:
                 await event.answer("🔄 Reopening Mega Subfolder Explorer...")
@@ -1151,7 +1236,24 @@ async def execute_session_download(
         return
 
     # Determine targeted nodes
-    if chosen_dir_h:
+    if chosen_action == "single":
+        node_h = chosen_dir_h
+        all_nodes = folder_info.get("nodes") or (folder_info.get("videos", []) + folder_info.get("photos", []) + folder_info.get("others", []))
+        target_node = next((n for n in all_nodes if n.get("h") == node_h), None)
+        if not target_node:
+            for d in folder_info.get("dirs", {}).values():
+                for f in d.get("direct_videos", []) + d.get("direct_photos", []) + d.get("direct_others", []):
+                    if f.get("h") == node_h:
+                        target_node = f
+                        break
+                if target_node:
+                    break
+        if not target_node:
+            await status_msg.edit("❌ **File not found in share.** Resend link if needed.", buttons=None)
+            return
+        selected_nodes = [target_node]
+        folder_display_name = target_node.get("folder_name") or target_node.get("name", "Single File")
+    elif chosen_dir_h:
         target_dir = folder_info["dirs"].get(chosen_dir_h)
         folder_display_name = (target_dir.get("path") or target_dir.get("name")) if target_dir else "Subfolder"
         if chosen_action == "video":
@@ -1407,9 +1509,31 @@ async def stream_and_upload_nodes(
                     if total_folders > 1 else ""
                 )
 
-                # Upfront Zero-Bandwidth Pre-Check for this folder!
+                # Upfront Zero-Bandwidth Pre-Check for this folder with live UI feedback!
+                last_chk_edit = 0.0
+                async def cache_check_progress(checked: int, total: int, cached: int):
+                    nonlocal last_chk_edit
+                    now = time.monotonic()
+                    if now - last_chk_edit >= 1.5 or checked == total:
+                        last_chk_edit = now
+                        pct = (checked / total) * 100.0 if total > 0 else 0.0
+                        bar_w = 12
+                        filled = min(bar_w, int(bar_w * checked // total)) if total > 0 else 0
+                        bar = "▰" * filled + "▱" * (bar_w - filled)
+                        chk_txt = (
+                            f"🔍 **VERIFYING STORAGE VAULT** ──────────────────── `[Step 1/3]`\n\n"
+                            f"📁 **Folder**: `{curr_folder_name}`\n"
+                            f"[{bar}] **{pct:.1f}%** (`{checked}/{total} verified`)\n"
+                            f"• ⏩ **Cached in Vault**: `{cached} files` (skipping)\n"
+                            f"• 📥 **Pending Transfer**: `{checked - cached} files`"
+                        )
+                        try:
+                            await status_msg.edit(chk_txt, buttons=make_stop_btn(user_id))
+                        except Exception:
+                            pass
+
                 missing_nodes, cached_nodes = await db.partition_nodes_by_cache(
-                    event.client, config.PRIVATE_CHAT_ID, folder_nodes
+                    event.client, config.PRIVATE_CHAT_ID, folder_nodes, progress_callback=cache_check_progress
                 )
                 if cached_nodes:
                     skipped_count += len(cached_nodes)
@@ -1439,6 +1563,11 @@ async def stream_and_upload_nodes(
 
                 folder_nodes = missing_nodes
                 folder_file_count = len(folder_nodes)
+
+                # Pipelined Producer-Consumer tracking variables
+                prefetched_task = None
+                prefetched_node_h = None
+                prefetched_dest = None
 
                 for file_idx, node in enumerate(folder_nodes, start=1):
                     if stop_monitor.is_set():
@@ -1535,16 +1664,29 @@ async def stream_and_upload_nodes(
                             except Exception:
                                 pass
 
-                    success = await download_mega_node_stream(
-                        session=dl_session,
-                        folder_id=folder_info["folder_id"],
-                        node=node,
-                        dest_path=dest_path,
-                        progress_callback=dl_progress,
-                        stop_event=stop_monitor,
-                    )
+                    # Check if this node was already pre-fetched in parallel while previous file uploaded!
+                    if prefetched_task and prefetched_node_h == node["h"]:
+                        try:
+                            success = await prefetched_task
+                            if prefetched_dest and prefetched_dest.exists():
+                                dest_path = prefetched_dest
+                        except Exception as p_err:
+                            logger.warning(f"Pre-fetch error for {file_name}: {p_err}")
+                            success = False
+                        prefetched_task = None
+                        prefetched_node_h = None
+                        prefetched_dest = None
+                    else:
+                        success = await download_mega_node_stream(
+                            session=dl_session,
+                            folder_id=folder_info["folder_id"],
+                            node=node,
+                            dest_path=dest_path,
+                            progress_callback=dl_progress,
+                            stop_event=stop_monitor,
+                        )
 
-                    if not success or not dest_path.exists():
+                    if not success or not dest_path or not dest_path.exists():
                         logger.warning(f"Skipping failed node download: {file_name}")
                         continue
 
@@ -1626,6 +1768,26 @@ async def stream_and_upload_nodes(
 
                     caption = f"🎬 `{dest_path.name}` (`{format_bytes(actual_size)}`)\n`#{file_key}` `#sz_{actual_size}`"
 
+                    # Pre-fetch NEXT node in background while current file uploads to Telegram!
+                    if file_idx < folder_file_count and not stop_monitor.is_set():
+                        next_n = folder_nodes[file_idx]
+                        next_name = sanitize_filename(next_n["name"])
+                        next_dest = local_dir / next_name
+                        if next_dest.exists():
+                            next_dest = local_dir / f"{next_dest.stem}_{next_n['h'][:4]}{next_dest.suffix}"
+                        prefetched_dest = next_dest
+                        prefetched_node_h = next_n["h"]
+                        prefetched_task = asyncio.create_task(
+                            download_mega_node_stream(
+                                session=dl_session,
+                                folder_id=folder_info["folder_id"],
+                                node=next_n,
+                                dest_path=next_dest,
+                                progress_callback=None,
+                                stop_event=stop_monitor,
+                            )
+                        )
+
                     sent_msg = await uploader.upload_media(
                         chat_id=target_chat_id,
                         file_path=dest_path,
@@ -1652,6 +1814,15 @@ async def stream_and_upload_nodes(
                             pass
                     try:
                         dest_path.unlink()
+                    except Exception:
+                        pass
+
+                # Cancel and clean up any remaining prefetched task for this folder
+                if prefetched_task and not prefetched_task.done():
+                    prefetched_task.cancel()
+                if prefetched_dest and prefetched_dest.exists():
+                    try:
+                        prefetched_dest.unlink()
                     except Exception:
                         pass
 
@@ -1763,12 +1934,7 @@ async def process_mega_link(
             folder_info = await inspect_mega_folder(url)
 
             if folder_info and folder_info["total_files"] > 0:
-                top_subfolders = folder_info.get("top_subfolders", [])
-
-                has_subfolders = folder_info.get("has_subfolders", False)
-
-                # CASE A: SUBFOLDERS FOUND (Any depth: 1 subfolder, 50 subfolders, or nested)
-                if has_subfolders:
+                if folder_info["total_files"] > 1:
                     session_id = uuid.uuid4().hex[:8]
                     sess = MegaSession(
                         session_id=session_id,
@@ -1811,89 +1977,20 @@ async def process_mega_link(
                         active_tasks=active_tasks_ref,
                     )
                     return
-
-                # CASE B: FLAT FOLDER (0 subfolders, all files directly in root)
-                elif folder_info["total_files"] > 1:
-                    raw_count = folder_info["total_files"]
-                    num_videos = len(folder_info["videos"])
-                    num_photos = len(folder_info["photos"])
-                    num_others = len(folder_info["others"])
-                    total_sz_readable = format_bytes(folder_info["total_size"])
-
-                    if not has_explicit_inline_filter and pending_prompts is not None:
-                        session_id = uuid.uuid4().hex[:8]
-                        loop = asyncio.get_running_loop()
-                        future = loop.create_future()
-                        pending_prompts[session_id] = (user_id, future)
-
-                        video_bytes = sum(f["size"] for f in folder_info["videos"])
-                        photo_bytes = sum(f["size"] for f in folder_info["photos"])
-                        other_bytes = sum(f["size"] for f in folder_info["others"])
-
-                        buttons = []
-                        row1 = []
-                        if num_videos > 0:
-                            row1.append(Button.inline("🎬 Videos", data=f"act:video:{session_id}"))
-                        if num_photos > 0:
-                            row1.append(Button.inline("🖼️ Photos", data=f"act:photo:{session_id}"))
-                        if row1:
-                            buttons.append(row1)
-
-                        row2 = []
-                        if num_others > 0:
-                            row2.append(Button.inline("📄 Others", data=f"act:other:{session_id}"))
-                        row2.append(Button.inline("📁 Download All", data=f"act:all:{session_id}"))
-                        buttons.append(row2)
-
-                        buttons.append([Button.inline("❌ Cancel", data=f"act:cancel:{session_id}")])
-
-                        msg_text = (
-                            f"📂 **Folder Discovered (Mega.nz)**\n\n"
-                            f"📊 **Total Content**: `{raw_count} Files` • `{total_sz_readable}`\n"
+                else:
+                    # Exactly 1 file in share - stream directly without extra prompt
+                    single_nodes = folder_info["videos"] + folder_info["photos"] + folder_info["others"]
+                    if single_nodes:
+                        await stream_and_upload_nodes(
+                            event=event,
+                            folder_info=folder_info,
+                            selected_nodes=single_nodes,
+                            status_msg=status_msg,
+                            user_id=user_id,
+                            folder_name=single_nodes[0].get("name", "Mega File"),
+                            filter_mode="all",
                         )
-                        if num_videos > 0:
-                            msg_text += f"• 🎬 **Videos**: `{num_videos} Files` (~`{format_bytes(video_bytes)}`)\n"
-                        if num_photos > 0:
-                            msg_text += f"• 🖼️ **Photos**: `{num_photos} Files` (~`{format_bytes(photo_bytes)}`)\n"
-                        if num_others > 0:
-                            msg_text += f"• 📄 **Others**: `{num_others} Files` (~`{format_bytes(other_bytes)}`)\n"
-                        msg_text += "\n👇 **Aapko kya download karna hai? Choose karo:**"
-
-                        await status_msg.edit(msg_text, buttons=buttons)
-
-                        try:
-                            chosen_action = await asyncio.wait_for(future, timeout=300)
-                        except asyncio.TimeoutError:
-                            await status_msg.edit("⏱️ **Selection timed out (5 min).** Resend link if needed.", buttons=None)
-                            return
-                        finally:
-                            pending_prompts.pop(session_id, None)
-
-                        if chosen_action == "cancel":
-                            await status_msg.edit("❌ **Download cancelled by user.**", buttons=None)
-                            return
-
-                        filter_mode = chosen_action
-
-                    if filter_mode == "video":
-                        selected_nodes = folder_info["videos"]
-                    elif filter_mode == "photo":
-                        selected_nodes = folder_info["photos"]
-                    elif filter_mode == "other":
-                        selected_nodes = folder_info["others"]
-                    else:
-                        selected_nodes = folder_info["videos"] + folder_info["photos"] + folder_info["others"]
-
-                    await stream_and_upload_nodes(
-                        event=event,
-                        folder_info=folder_info,
-                        selected_nodes=selected_nodes,
-                        status_msg=status_msg,
-                        user_id=user_id,
-                        folder_name="Mega Folder",
-                        filter_mode=filter_mode,
-                    )
-                    return
+                        return
 
         # ---------------- FALLBACK ENGINE FOR SINGLE FILES / CLI ---------------- #
         engine_name, base_cmd = detect_mega_engine()
