@@ -649,26 +649,35 @@ async def download_mega_node_stream(
                 lock = asyncio.Lock()
 
                 tasks = [
-                    _download_mega_range_chunk(
-                        session=session,
-                        g_url=g_url,
-                        start_byte=start,
-                        end_byte=end,
-                        output_file_path=dest_path,
-                        part_id=i,
-                        file_key=file_key,
-                        iv_int=iv_int,
-                        progress_tracker=progress_tracker,
-                        progress_callback=progress_callback,
-                        total_size=target_size,
-                        lock=lock,
-                        stop_event=stop_event,
+                    asyncio.create_task(
+                        _download_mega_range_chunk(
+                            session=session,
+                            g_url=g_url,
+                            start_byte=start,
+                            end_byte=end,
+                            output_file_path=dest_path,
+                            part_id=i,
+                            file_key=file_key,
+                            iv_int=iv_int,
+                            progress_tracker=progress_tracker,
+                            progress_callback=progress_callback,
+                            total_size=target_size,
+                            lock=lock,
+                            stop_event=stop_event,
+                        )
                     )
                     for i, (start, end) in enumerate(ranges)
                 ]
-                await asyncio.gather(*tasks)
+                try:
+                    results = await asyncio.gather(*tasks)
+                except Exception:
+                    for t in tasks:
+                        if not t.done():
+                            t.cancel()
+                    raise
 
-                if dest_path.exists() and dest_path.stat().st_size == target_size:
+                total_downloaded = sum(results)
+                if total_downloaded == target_size and dest_path.exists() and dest_path.stat().st_size == target_size:
                     return True
             except Exception as par_err:
                 logger.info(f"Mega parallel stream notice ({par_err}), falling back to single stream...")
@@ -1220,6 +1229,7 @@ async def execute_session_download(
         # Wait up to 30 minutes for user choice
         chosen_action, chosen_dir_h = await asyncio.wait_for(sess.future, timeout=1800)
     except asyncio.TimeoutError:
+        queue_mgr.release_worker(user_id)
         try:
             await status_msg.edit("⏱️ **Session timed out (30 min).** Resend link if needed.", buttons=None)
         except Exception:
@@ -1229,6 +1239,7 @@ async def execute_session_download(
         pass
 
     if chosen_action == "cancel":
+        queue_mgr.release_worker(user_id)
         try:
             await status_msg.edit("❌ **Cancelled by user.**", buttons=None)
         except Exception:
@@ -1290,6 +1301,7 @@ async def execute_session_download(
 
     # Execute stream download & upload
     try:
+        await queue_mgr.enter_worker(user_id)
         await stream_and_upload_nodes(
             event=event,
             folder_info=folder_info,
@@ -1310,6 +1322,8 @@ async def execute_session_download(
             )
         except Exception:
             pass
+    finally:
+        queue_mgr.release_worker(user_id)
 
 
 async def stream_and_upload_nodes(
@@ -1737,10 +1751,10 @@ async def stream_and_upload_nodes(
                     thumb_path = None
                     if is_video_file(dest_path):
                         try:
-                            meta = get_video_metadata(dest_path)
+                            meta = await get_video_metadata(dest_path)
                             dur = meta.get("duration", 0) if meta else 0
                             thumb_ts = max(1, dur // 10) if dur > 0 else 1
-                            thumb_path = generate_video_thumbnail(dest_path, timestamp_sec=thumb_ts)
+                            thumb_path = await generate_video_thumbnail(dest_path, timestamp_sec=thumb_ts)
                         except Exception as thumb_err:
                             logger.warning(f"Failed thumbnail for {dest_path.name}: {thumb_err}")
 
@@ -1916,13 +1930,6 @@ async def process_mega_link(
     slot_acquired = True
 
     try:
-        if queue_pos > 1:
-            status_msg = await event.reply(
-                f"⏳ **Queued in slot #{queue_pos}**\nYour Mega download will begin shortly...",
-                buttons=make_stop_btn(user_id),
-            )
-        await queue_mgr.enter_worker()
-
         if not status_msg:
             status_msg = await event.reply("🔍 **Resolving Mega link...**", buttons=make_stop_btn(user_id))
         else:
@@ -1981,15 +1988,19 @@ async def process_mega_link(
                     # Exactly 1 file in share - stream directly without extra prompt
                     single_nodes = folder_info["videos"] + folder_info["photos"] + folder_info["others"]
                     if single_nodes:
-                        await stream_and_upload_nodes(
-                            event=event,
-                            folder_info=folder_info,
-                            selected_nodes=single_nodes,
-                            status_msg=status_msg,
-                            user_id=user_id,
-                            folder_name=single_nodes[0].get("name", "Mega File"),
-                            filter_mode="all",
-                        )
+                        try:
+                            await queue_mgr.enter_worker(user_id)
+                            await stream_and_upload_nodes(
+                                event=event,
+                                folder_info=folder_info,
+                                selected_nodes=single_nodes,
+                                status_msg=status_msg,
+                                user_id=user_id,
+                                folder_name=single_nodes[0].get("name", "Mega File"),
+                                filter_mode="all",
+                            )
+                        finally:
+                            queue_mgr.release_worker(user_id)
                         return
 
         # ---------------- FALLBACK ENGINE FOR SINGLE FILES / CLI ---------------- #
@@ -2017,6 +2028,7 @@ async def process_mega_link(
         else:
             cmd = base_cmd + ["--path", str(local_dir), engine_url]
 
+        await queue_mgr.enter_worker(user_id)
         await status_msg.edit(f"**📥 DOWNLOADING FROM MEGA [Step 1/2]**\n`Engine: {engine_name}`", buttons=make_stop_btn(user_id))
 
         process = await asyncio.create_subprocess_exec(
@@ -2043,9 +2055,10 @@ async def process_mega_link(
             thumb_path = None
             if is_video_file(f):
                 try:
-                    meta = get_video_metadata(f)
-                    if meta and meta.get("duration", 0) > 0:
-                        thumb_path = await generate_video_thumbnail(f, meta["duration"])
+                    meta = await get_video_metadata(f)
+                    dur = meta.get("duration", 0) if meta else 0
+                    thumb_ts = max(1, dur // 10) if dur > 0 else 1
+                    thumb_path = await generate_video_thumbnail(f, timestamp_sec=thumb_ts)
                 except Exception:
                     pass
 

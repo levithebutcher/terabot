@@ -166,25 +166,37 @@ class TeraBoxDownloader:
         conn = aiohttp.TCPConnector(limit=connections + 4, ttl_dns_cache=300)
         async with aiohttp.ClientSession(connector=conn, read_bufsize=1024 * 1024) as session:
             tasks = [
-                self._download_range_chunk(
-                    session=session,
-                    dlink=dlink,
-                    start_byte=start,
-                    end_byte=end,
-                    output_file_path=part_path,
-                    part_id=i,
-                    progress_tracker=progress_tracker,
-                    progress_callback=progress_callback,
-                    total_size=total_size,
-                    lock=lock,
+                asyncio.create_task(
+                    self._download_range_chunk(
+                        session=session,
+                        dlink=dlink,
+                        start_byte=start,
+                        end_byte=end,
+                        output_file_path=part_path,
+                        part_id=i,
+                        progress_tracker=progress_tracker,
+                        progress_callback=progress_callback,
+                        total_size=total_size,
+                        lock=lock,
+                    )
                 )
                 for i, (start, end) in enumerate(ranges)
             ]
-            results = await asyncio.gather(*tasks)
+            try:
+                results = await asyncio.gather(*tasks)
+            except Exception:
+                for t in tasks:
+                    if not t.done():
+                        t.cancel()
+                raise
+
+        total_downloaded = sum(results)
+        if total_downloaded != total_size:
+            raise DownloadError(f"Parallel download size mismatch: expected {total_size}, received {total_downloaded}")
 
         actual_size = part_path.stat().st_size
         if actual_size != total_size:
-            raise DownloadError(f"Parallel download size mismatch: expected {total_size}, got {actual_size}")
+            raise DownloadError(f"Parallel download disk size mismatch: expected {total_size}, got {actual_size}")
 
         if final_path.exists():
             final_path.unlink()

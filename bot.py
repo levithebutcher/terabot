@@ -495,12 +495,6 @@ async def process_terabox_link(
 
     try:
         status_msg = await event.reply("🔍 **Resolving TeraBox link...**")
-        if queue_pos > 1:
-            await status_msg.edit(f"⏳ **Queue Position #{queue_pos}**\nWaiting for an available worker slot...")
-
-        # Concurrency slot acquisition
-        await queue_mgr.enter_worker()
-
         # Step 1: Resolve Link
         resolver = TeraBoxResolver()
         try:
@@ -651,6 +645,9 @@ async def process_terabox_link(
                 buttons=make_stop_btn(user_id),
             )
             await asyncio.sleep(1.5)
+        # Acquire worker concurrency lease immediately before beginning downloads
+        await queue_mgr.enter_worker(user_id)
+
         target_chat_id = config.PRIVATE_CHAT_ID if config.PRIVATE_CHAT_ID else event.chat_id
         delivery_mode = await db.get_user_delivery_mode(user_id)
         uploaded_count = 0
@@ -1094,11 +1091,11 @@ async def handle_incoming_message(event: events.NewMessage.Event):
 
     # If message is posted in a Channel where the bot is Admin:
     if event.is_channel:
-        # Automatically connect and save this storage channel!
-        if not config.PRIVATE_CHAT_ID or config.PRIVATE_CHAT_ID != event.chat_id:
+        # Only allow auto-configuration if channel is not set and message is from an authorized admin
+        if not config.PRIVATE_CHAT_ID and event.sender_id in config.ADMIN_IDS:
             config.PRIVATE_CHAT_ID = event.chat_id
             update_env_file("PRIVATE_CHAT_ID", str(event.chat_id))
-            logger.info(f"Auto-detected storage channel ID: {event.chat_id}")
+            logger.info(f"Admin auto-detected storage channel ID: {event.chat_id}")
             asyncio.create_task(db.sync_channel_cache(client, event.chat_id))
             if config.ADMIN_IDS:
                 try:
@@ -1110,7 +1107,7 @@ async def handle_incoming_message(event: events.NewMessage.Event):
                     )
                 except Exception as notify_err:
                     logger.warning(f"Failed to notify admin of channel auto-detection: {notify_err}")
-        return  # Never post command/access responses inside the storage channel!
+        return  # Never post command/access responses inside channels!
 
     # Only process private 1-on-1 messages for downloads
     if not event.is_private:

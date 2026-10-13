@@ -93,7 +93,12 @@ def get_random_joke() -> str:
 
 def can_send_joke(user_id: int) -> bool:
     """Enforce a cooldown so text spammers don't trigger Telegram FloodWait."""
+    global _user_joke_cooldown
     now = time.monotonic()
+    if len(_user_joke_cooldown) > 1000:
+        threshold = now - 60.0
+        _user_joke_cooldown = {uid: t for uid, t in _user_joke_cooldown.items() if t >= threshold}
+
     last = _user_joke_cooldown.get(user_id, 0.0)
     if now - last < COOLDOWN_SECONDS:
         return False

@@ -1,3 +1,4 @@
+import asyncio
 import json
 import os
 import shutil
@@ -29,8 +30,8 @@ def is_photo_file(file_path: Path) -> bool:
     return file_path.suffix.lower() in IMAGE_EXTENSIONS
 
 
-def get_video_metadata(file_path: Path) -> dict:
-    """Extract duration, width, and height using ffprobe."""
+def get_video_metadata_sync(file_path: Path) -> dict:
+    """Synchronous core extraction of duration, width, and height using ffprobe."""
     meta = {"duration": 0, "width": 0, "height": 0}
     if not FFPROBE_BIN or not file_path.exists():
         return meta
@@ -64,8 +65,15 @@ def get_video_metadata(file_path: Path) -> dict:
     return meta
 
 
-def generate_video_thumbnail(file_path: Path, output_path: Optional[Path] = None, timestamp_sec: int = 2) -> Optional[Path]:
-    """Generate a JPEG thumbnail from video using ffmpeg."""
+async def get_video_metadata(file_path: Path) -> dict:
+    """Non-blocking async wrapper to extract video metadata off the event loop thread."""
+    return await asyncio.to_thread(get_video_metadata_sync, file_path)
+
+
+def generate_video_thumbnail_sync(
+    file_path: Path, output_path: Optional[Path] = None, timestamp_sec: int = 2
+) -> Optional[Path]:
+    """Synchronous core generation of a JPEG thumbnail from video using ffmpeg."""
     if not FFMPEG_BIN or not file_path.exists():
         return None
 
@@ -89,3 +97,10 @@ def generate_video_thumbnail(file_path: Path, output_path: Optional[Path] = None
         logger.debug(f"ffmpeg thumbnail generation failed: {e}")
 
     return None
+
+
+async def generate_video_thumbnail(
+    file_path: Path, output_path: Optional[Path] = None, timestamp_sec: int = 2
+) -> Optional[Path]:
+    """Non-blocking async wrapper to generate thumbnail off the event loop thread."""
+    return await asyncio.to_thread(generate_video_thumbnail_sync, file_path, output_path, timestamp_sec)

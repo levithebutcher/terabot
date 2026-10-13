@@ -69,12 +69,19 @@ class TeraBoxResolver:
     def __init__(self, cookie: Optional[str] = None):
         self.cookie = cookie if cookie is not None else TERABOX_COOKIE
 
-    def _wrap_url(self, target_url: str) -> str:
+    def _wrap_url(self, target_url: str, params: Optional[dict] = None) -> str:
         """If PROXY_URL (Cloudflare Worker) is configured, wrap request through worker."""
-        if not PROXY_URL:
-            return target_url
-        from urllib.parse import quote
-        return f"{PROXY_URL}/?target_url={quote(target_url, safe='')}"
+        import config
+        proxy_url = getattr(config, "PROXY_URL", "")
+        from urllib.parse import quote, urlencode
+        full_target = target_url
+        if params:
+            qs = urlencode(params)
+            sep = "&" if "?" in target_url else "?"
+            full_target = f"{target_url}{sep}{qs}"
+        if not proxy_url:
+            return full_target
+        return f"{proxy_url}/?target_url={quote(full_target, safe='')}"
 
     def _get_cookie_dict(self) -> dict:
         """Parse raw cookie header string into a dictionary."""
@@ -224,9 +231,15 @@ class TeraBoxResolver:
             "X-Requested-With": "XMLHttpRequest",
         })
 
-        fetch_api_url = self._wrap_url(api_url)
+        if PROXY_URL:
+            fetch_api_url = self._wrap_url(api_url, params=params)
+            call_params = None
+        else:
+            fetch_api_url = api_url
+            call_params = params
+
         try:
-            resp = await session.get(fetch_api_url, params=params, headers=headers, timeout=15)
+            resp = await session.get(fetch_api_url, params=call_params, headers=headers, timeout=15)
         except Exception as e:
             raise ResolverError(f"Network error querying /share/list: {e}")
 

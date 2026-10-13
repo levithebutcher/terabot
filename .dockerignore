@@ -1,0 +1,40 @@
+# Environment and secrets
+.env
+*.env
+cookie.env/
+cookies*.txt
+*_prefilled.ipynb
+
+# Git and research
+.git
+_research/
+
+# Python artifacts
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+env/
+venv/
+ENV/
+build/
+dist/
+
+# Application runtime data
+downloads/
+temp/
+logs/
+*.part
+
+# Sessions and databases
+*.session
+*.session-journal
+*.db
+*.sqlite
+*.sqlite3
+
+# OS files
+Thumbs.db
+Desktop.ini
+.DS_Store

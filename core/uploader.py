@@ -180,7 +180,7 @@ class TelethonUploader:
         generated_thumb = None
 
         if is_video:
-            meta = get_video_metadata(file_path)
+            meta = await get_video_metadata(file_path)
             duration = meta.get("duration", 0)
             width = meta.get("width", 0)
             height = meta.get("height", 0)
@@ -197,57 +197,58 @@ class TelethonUploader:
             # If no thumb provided or doesn't exist, generate one
             if not thumb_path or not thumb_path.exists():
                 thumb_timestamp = max(1, duration // 10) if duration > 0 else 1
-                generated_thumb = generate_video_thumbnail(file_path, timestamp_sec=thumb_timestamp)
+                generated_thumb = await generate_video_thumbnail(file_path, timestamp_sec=thumb_timestamp)
                 if generated_thumb and generated_thumb.exists():
                     thumb_path = generated_thumb
 
-        retry_count = 0
-        while retry_count < max_retries:
-            try:
-                t0 = time.monotonic()
+        try:
+            retry_count = 0
+            while retry_count < max_retries:
+                try:
+                    t0 = time.monotonic()
 
-                # Step 1: Upload raw file in parallel chunks (up to 4-6x faster than default sequential upload)
-                input_file = await fast_upload_file(
-                    client=self.client,
-                    file_path=file_path,
-                    part_size_kb=512,
-                    workers=workers,
-                    progress_callback=progress_callback,
-                    max_retries=max_retries,
-                )
+                    # Step 1: Upload raw file in parallel chunks (up to 4-6x faster than default sequential upload)
+                    input_file = await fast_upload_file(
+                        client=self.client,
+                        file_path=file_path,
+                        part_size_kb=512,
+                        workers=workers,
+                        progress_callback=progress_callback,
+                        max_retries=max_retries,
+                    )
 
-                # Step 2: Send the uploaded file handle with attributes
-                msg = await self.client.send_file(
-                    entity=chat_id,
-                    file=input_file,
-                    caption=caption,
-                    thumb=str(thumb_path) if thumb_path and thumb_path.exists() and thumb_path.stat().st_size > 0 else None,
-                    attributes=attributes if attributes else None,
-                    supports_streaming=is_video,
-                )
-                total_upload_time = time.monotonic() - t0
-                avg_speed = (file_size / (1024 * 1024)) / total_upload_time if total_upload_time > 0 else 0.0
-                logger.info(
-                    f"Uploaded {file_path.name} ({format_bytes(file_size)}) in {total_upload_time:.1f}s at {avg_speed:.2f} MB/s"
-                )
-                return msg
+                    # Step 2: Send the uploaded file handle with attributes
+                    msg = await self.client.send_file(
+                        entity=chat_id,
+                        file=input_file,
+                        caption=caption,
+                        thumb=str(thumb_path) if thumb_path and thumb_path.exists() and thumb_path.stat().st_size > 0 else None,
+                        attributes=attributes if attributes else None,
+                        supports_streaming=is_video,
+                    )
+                    total_upload_time = time.monotonic() - t0
+                    avg_speed = (file_size / (1024 * 1024)) / total_upload_time if total_upload_time > 0 else 0.0
+                    logger.info(
+                        f"Uploaded {file_path.name} ({format_bytes(file_size)}) in {total_upload_time:.1f}s at {avg_speed:.2f} MB/s"
+                    )
+                    return msg
 
-            except FloodWaitError as e:
-                logger.warning(f"Telegram FloodWait: sleeping for {e.seconds} seconds")
-                await asyncio.sleep(e.seconds + 1)
-                retry_count += 1
-            except Exception as e:
-                logger.error(f"Error during file upload attempt {retry_count + 1}: {e}")
-                retry_count += 1
-                if retry_count >= max_retries:
-                    raise
-                await asyncio.sleep(2 * retry_count)
-            finally:
-                if generated_thumb and generated_thumb.exists():
-                    try:
-                        generated_thumb.unlink()
-                    except Exception:
-                        pass
+                except FloodWaitError as e:
+                    logger.warning(f"Telegram FloodWait: sleeping for {e.seconds} seconds")
+                    await asyncio.sleep(e.seconds + 1)
+                    retry_count += 1
+                except Exception as e:
+                    logger.error(f"Error during file upload attempt {retry_count + 1}: {e}")
+                    retry_count += 1
+                    if retry_count >= max_retries:
+                        raise
+                    await asyncio.sleep(2 * retry_count)
+        finally:
+            if generated_thumb and generated_thumb.exists():
+                try:
+                    generated_thumb.unlink()
+                except Exception:
+                    pass
 
     async def upload_album(
         self,

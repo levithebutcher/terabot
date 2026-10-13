@@ -26,6 +26,8 @@ class Database:
         """Initialize SQLite tables and connect to MongoDB Atlas if configured."""
         # 1. Initialize local SQLite tables (Fallback & Local Cache)
         async with aiosqlite.connect(self.db_path) as db:
+            await db.execute("PRAGMA journal_mode=WAL;")
+            await db.execute("PRAGMA synchronous=NORMAL;")
             await db.execute("""
                 CREATE TABLE IF NOT EXISTS cached_files (
                     file_key TEXT PRIMARY KEY,
@@ -469,7 +471,7 @@ class Database:
                     file_key = m_tag.group(1) if m_tag else None
 
                     if not file_key and f_size > 0:
-                        file_key = f"sz_{f_size}"
+                        file_key = f"sz_{f_size}_{abs(hash((f_name or 'media') + str(msg.id)))}"
 
                     if file_key:
                         await self.save_cached_file(file_key, f_name or "media", f_size, channel_id, msg.id)
@@ -482,9 +484,10 @@ class Database:
                 # Use ID batching via get_messages(ids=...) which is 100% supported for bots!
                 try:
                     count = 0
-                    probe = await client.send_message(channel_id, "🔄 Indexing storage channel...")
-                    latest_id = probe.id
-                    await client.delete_messages(channel_id, [probe.id])
+                    latest_msgs = await client.get_messages(channel_id, limit=1)
+                    if not latest_msgs:
+                        return
+                    latest_id = latest_msgs[0].id
 
                     batch_size = 100
                     start_min = max(1, latest_id - limit)
@@ -524,7 +527,7 @@ class Database:
                             file_key = m_tag.group(1) if m_tag else None
 
                             if not file_key and f_size > 0:
-                                file_key = f"sz_{f_size}"
+                                file_key = f"sz_{f_size}_{abs(hash((f_name or 'media') + str(msg.id)))}"
 
                             if file_key or f_size > 0:
                                 fk = file_key or f"msg_{msg.id}"
