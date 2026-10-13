@@ -969,7 +969,7 @@ active_tasks: dict[int, asyncio.Task] = {}
 set_active_tasks_ref(active_tasks)
 pending_prompts: dict[str, tuple[int, asyncio.Future]] = {}
 
-@client.on(events.CallbackQuery(pattern=r"^m_(nav|dir|act|allact|home|srch|cancel|reopen):"))
+@client.on(events.CallbackQuery(pattern=r"^m_"))
 async def handle_mega_explorer_callback(event: events.CallbackQuery.Event):
     await mega_mgr.handle_callback(event, client, active_tasks)
 

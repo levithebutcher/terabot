@@ -302,9 +302,19 @@ async def inspect_mega_folder(url: str) -> Optional[dict]:
                                 "p": node.get("p"),
                                 "h": node["h"],
                                 "children": [],
+                                "direct_videos": [],
+                                "direct_photos": [],
+                                "direct_others": [],
+                                "all_videos": [],
+                                "all_photos": [],
+                                "all_others": [],
                                 "videos": [],
                                 "photos": [],
                                 "others": [],
+                                "path": "",
+                                "active_children": [],
+                                "total_files": 0,
+                                "total_size": 0,
                             }
                     except Exception:
                         continue
@@ -315,23 +325,25 @@ async def inspect_mega_folder(url: str) -> Optional[dict]:
             if p in dirs:
                 dirs[p]["children"].append(h)
 
-        # Identify top-level subfolders
+        # Identify root folder handle
         root_candidates = [h for h, d in dirs.items() if d["p"] not in dirs]
-        root_h = root_candidates[0] if root_candidates else None
-        top_subfolder_handles = dirs[root_h]["children"] if root_h else list(dirs.keys())
+        root_h = root_candidates[0] if root_candidates else (list(dirs.keys())[0] if dirs else None)
 
-        # Map each top-level subfolder to all its descendant directory handles
-        def get_descendants(dh):
-            res = {dh}
-            for ch in dirs.get(dh, {}).get("children", []):
-                res.update(get_descendants(ch))
-            return res
+        # Build full breadcrumb path for every directory starting from root
+        def build_dir_paths(dh, current_path):
+            if dh not in dirs:
+                return
+            dirs[dh]["path"] = current_path
+            for ch in dirs[dh]["children"]:
+                if ch in dirs:
+                    ch_name = dirs[ch]["name"]
+                    build_dir_paths(ch, f"{current_path} / {ch_name}")
 
-        top_folder_descendants = {sf_h: get_descendants(sf_h) for sf_h in top_subfolder_handles}
-        dir_to_top_folder = {}
-        for sf_h, desc_set in top_folder_descendants.items():
-            for d_h in desc_set:
-                dir_to_top_folder[d_h] = sf_h
+        if root_h and root_h in dirs:
+            build_dir_paths(root_h, dirs[root_h]["name"])
+        else:
+            for dh in dirs:
+                dirs[dh]["path"] = dirs[dh]["name"]
 
         # 2. Parse and decrypt all file nodes
         global_videos = []
@@ -381,52 +393,95 @@ async def inspect_mega_folder(url: str) -> Optional[dict]:
                 size = node.get("s", 0)
                 ext = ("." + name.split(".")[-1].lower()) if "." in name else ""
 
+                parent_h = node.get("p")
+                if parent_h in dirs:
+                    file_folder_path = dirs[parent_h]["path"]
+                elif root_h and root_h in dirs:
+                    file_folder_path = dirs[root_h]["path"]
+                else:
+                    file_folder_path = "Main Folder"
+
                 item = {
                     "name": name,
                     "size": size,
                     "h": node["h"],
                     "file_key": file_key,
                     "iv_int": iv_int,
+                    "p": parent_h,
+                    "folder_name": file_folder_path,
                 }
 
-                # Global lists
+                # Global and direct folder lists
                 if ext in VIDEO_EXTENSIONS:
                     global_videos.append(item)
+                    if parent_h in dirs:
+                        dirs[parent_h]["direct_videos"].append(item)
                 elif ext in IMAGE_EXTENSIONS:
                     global_photos.append(item)
+                    if parent_h in dirs:
+                        dirs[parent_h]["direct_photos"].append(item)
                 else:
                     global_others.append(item)
-
-                # Subfolder-level assignment
-                parent_h = node.get("p")
-                top_sf_h = dir_to_top_folder.get(parent_h)
-                if top_sf_h and top_sf_h in dirs:
-                    sub_name = dirs[top_sf_h]["name"]
-                    item["folder_name"] = sub_name
-                    if ext in VIDEO_EXTENSIONS:
-                        dirs[top_sf_h]["videos"].append(item)
-                    elif ext in IMAGE_EXTENSIONS:
-                        dirs[top_sf_h]["photos"].append(item)
-                    else:
-                        dirs[top_sf_h]["others"].append(item)
-                else:
-                    item["folder_name"] = "Main Folder"
+                    if parent_h in dirs:
+                        dirs[parent_h]["direct_others"].append(item)
 
             except Exception:
                 continue
 
-        # Filter active top subfolders (those containing files directly or in nested subfolders)
-        active_top_folders = [
-            sf_h
-            for sf_h in top_subfolder_handles
-            if (len(dirs[sf_h]["videos"]) + len(dirs[sf_h]["photos"]) + len(dirs[sf_h]["others"])) > 0
-        ]
-        active_top_folders.sort(key=lambda x: dirs[x]["name"].lower())
+        # 3. Recursive rollup: Compute all descendants and totals for every directory
+        visited = set()
+        def compute_recursive_files(dh):
+            if dh not in dirs or dh in visited:
+                return [], [], []
+            visited.add(dh)
+            d = dirs[dh]
+            vids = list(d["direct_videos"])
+            photos = list(d["direct_photos"])
+            others = list(d["direct_others"])
+            for ch in d["children"]:
+                ch_v, ch_p, ch_o = compute_recursive_files(ch)
+                vids.extend(ch_v)
+                photos.extend(ch_p)
+                others.extend(ch_o)
+            d["all_videos"] = vids
+            d["all_photos"] = photos
+            d["all_others"] = others
+            d["videos"] = vids
+            d["photos"] = photos
+            d["others"] = others
+            d["total_files"] = len(vids) + len(photos) + len(others)
+            d["total_size"] = sum(f["size"] for f in vids + photos + others)
+            return vids, photos, others
 
-        for sf_h in active_top_folders:
-            d = dirs[sf_h]
-            d["total_files"] = len(d["videos"]) + len(d["photos"]) + len(d["others"])
-            d["total_size"] = sum(f["size"] for f in d["videos"] + d["photos"] + d["others"])
+        if root_h and root_h in dirs:
+            compute_recursive_files(root_h)
+        for dh in list(dirs.keys()):
+            if dh not in visited:
+                compute_recursive_files(dh)
+
+        # Set active_children for every folder (only children that contain files directly or in subfolders)
+        for dh, d in dirs.items():
+            act_ch = [ch for ch in d["children"] if ch in dirs and dirs[ch]["total_files"] > 0]
+            act_ch.sort(key=lambda x: dirs[x]["name"].lower())
+            d["active_children"] = act_ch
+
+        # Auto-focus to the first meaningful folder if intermediate roots are single empty wrappers
+        current_root = root_h
+        while (
+            current_root
+            and current_root in dirs
+            and (len(dirs[current_root]["direct_videos"]) + len(dirs[current_root]["direct_photos"]) + len(dirs[current_root]["direct_others"])) == 0
+            and len(dirs[current_root]["active_children"]) == 1
+        ):
+            current_root = dirs[current_root]["active_children"][0]
+        if current_root:
+            root_h = current_root
+
+        # Determine if any subfolders exist anywhere in the hierarchy
+        has_subfolders = any(len(d["active_children"]) > 0 for d in dirs.values())
+        top_subfolders = dirs[root_h]["active_children"] if (root_h and root_h in dirs) else [
+            dh for dh, d in dirs.items() if d["total_files"] > 0
+        ]
 
         total_files = len(global_videos) + len(global_photos) + len(global_others)
         total_size = sum(f["size"] for f in global_videos + global_photos + global_others)
@@ -435,7 +490,9 @@ async def inspect_mega_folder(url: str) -> Optional[dict]:
             "folder_id": folder_id,
             "folder_key": folder_key,
             "dirs": dirs,
-            "top_subfolders": active_top_folders,
+            "root_h": root_h,
+            "has_subfolders": has_subfolders,
+            "top_subfolders": top_subfolders,
             "videos": global_videos,
             "photos": global_photos,
             "others": global_others,
@@ -678,7 +735,7 @@ class MegaSession:
         self.created_at = time.time()
         self.last_active = time.time()
         self.current_page = 0
-        self.current_dir_h = None
+        self.current_dir_h = folder_info.get("root_h")
         self.search_query = None
         self.search_results = []
         self.awaiting_search = False
@@ -713,7 +770,7 @@ class MegaExplorerManager:
         return bool(sess and sess.awaiting_search)
 
     async def handle_search_input(self, event: events.NewMessage.Event):
-        """Process keyword sent by user for folder name filtering."""
+        """Process keyword sent by user for folder name filtering across all depths."""
         user_id = event.sender_id
         sess_id = self.user_to_session.get(user_id)
         sess = self.sessions.get(sess_id)
@@ -725,10 +782,14 @@ class MegaExplorerManager:
         sess.last_active = time.time()
 
         matches = []
-        for sf_h in sess.folder_info["top_subfolders"]:
-            d = sess.folder_info["dirs"][sf_h]
+        root_h = sess.folder_info.get("root_h")
+        for dh, d in sess.folder_info["dirs"].items():
+            if dh == root_h and len(sess.folder_info["dirs"]) > 1:
+                continue
+            if d.get("total_files", 0) == 0:
+                continue
             if query.lower() in d["name"].lower():
-                matches.append(sf_h)
+                matches.append(dh)
 
         sess.search_query = query
         sess.search_results = matches
@@ -758,136 +819,159 @@ class MegaExplorerManager:
             except Exception:
                 pass
 
-    async def render_explorer(self, sess: MegaSession, page: int = 0, event=None):
-        """Render paginated folder buttons list (6 folders per page)."""
+    async def render_folder(self, sess: MegaSession, dir_h: Optional[str] = None, page: int = 0, event=None):
+        """Render interactive folder drill-down view showing path, child subfolders, and recursive download options."""
         sess.last_active = time.time()
-        sess.current_dir_h = None
         sess.awaiting_search = False
-        top_folders = sess.folder_info["top_subfolders"]
-        total_folders = len(top_folders)
 
-        PAGE_SIZE = 6
-        total_pages = max(1, (total_folders + PAGE_SIZE - 1) // PAGE_SIZE)
-        page = max(0, min(page, total_pages - 1))
+        root_h = sess.folder_info.get("root_h")
+        if not dir_h:
+            dir_h = sess.current_dir_h or root_h
+        if not dir_h or dir_h not in sess.folder_info["dirs"]:
+            dir_h = root_h
+
+        sess.current_dir_h = dir_h
         sess.current_page = page
+        d = sess.folder_info["dirs"].get(dir_h)
+        if not d:
+            return
 
-        start_idx = page * PAGE_SIZE
-        end_idx = min(start_idx + PAGE_SIZE, total_folders)
-        page_folders = top_folders[start_idx:end_idx]
+        folder_path = d.get("path") or d["name"]
+        active_children = d.get("active_children", [])
+        total_children = len(active_children)
 
-        total_files = sess.folder_info["total_files"]
-        total_size_str = format_bytes(sess.folder_info["total_size"])
+        tot_files = d.get("total_files", 0)
+        tot_size = format_bytes(d.get("total_size", 0))
+
+        vids = d.get("all_videos", d.get("videos", []))
+        photos = d.get("all_photos", d.get("photos", []))
+        others = d.get("all_others", d.get("others", []))
+
+        num_v = len(vids)
+        num_p = len(photos)
+        num_o = len(others)
+
+        v_sz = format_bytes(sum(f["size"] for f in vids))
+        p_sz = format_bytes(sum(f["size"] for f in photos))
+        o_sz = format_bytes(sum(f["size"] for f in others))
 
         text = (
-            f"🗂️ **Mega Subfolders Explorer**\n\n"
-            f"📊 **Total Content**: `{total_folders} Folders` • `{total_files} Files` • `{total_size_str}`\n"
-            f"📄 **Page**: `{page + 1} / {total_pages}` (Showing {start_idx + 1}–{end_idx})\n\n"
-            f"👇 **Neeche kisi bhi folder pe click karo uski videos/photos chunne ke liye:**"
+            f"🗂️ **Mega Folder Explorer**\n\n"
+            f"📁 **Path**: `{folder_path}`\n\n"
+            f"📊 **Content (Includes Subfolders)**:\n"
         )
+        if total_children > 0:
+            text += f"• 📂 **Inner Subfolders**: `{total_children}`\n"
+        if num_v > 0:
+            text += f"• 🎬 **Videos**: `{num_v} Files` (~`{v_sz}`)\n"
+        if num_p > 0:
+            text += f"• 🖼️ **Photos**: `{num_p} Files` (~`{p_sz}`)\n"
+        if num_o > 0:
+            text += f"• 📄 **Others**: `{num_o} Files` (~`{o_sz}`)\n"
+        text += f"• 💾 **Total**: `{tot_files} Files` • `{tot_size}`\n\n"
+
+        if total_children > 0:
+            text += "👇 **Subfolder chunne ke liye click karo (ya direct download karo):**"
+        else:
+            text += "👇 **Download karne ke liye option chuno:**"
 
         buttons = []
-        for sf_h in page_folders:
-            d = sess.folder_info["dirs"][sf_h]
-            raw_name = d["name"]
-            disp_name = (raw_name[:18] + "…") if len(raw_name) > 18 else raw_name
-            tot = d["total_files"]
-            sz_str = format_bytes(d["total_size"])
-            btn_text = f"📂 {disp_name} ({tot} • {sz_str})"
-            buttons.append([Button.inline(btn_text, data=f"m_dir:{sess.session_id}:{sf_h}")])
 
-        # Pagination row
-        nav_row = []
-        if page > 0:
-            nav_row.append(Button.inline("⬅️ Prev", data=f"m_nav:{sess.session_id}:{page - 1}"))
-        nav_row.append(Button.inline(f"📄 {page + 1}/{total_pages}", data=f"m_nav:{sess.session_id}:{page}"))
-        if page < total_pages - 1:
-            nav_row.append(Button.inline("Next ➡️", data=f"m_nav:{sess.session_id}:{page + 1}"))
-        buttons.append(nav_row)
+        # 1. Child Subfolder Buttons (Paginated, 6 per page)
+        if total_children > 0:
+            PAGE_SIZE = 6
+            total_pages = max(1, (total_children + PAGE_SIZE - 1) // PAGE_SIZE)
+            page = max(0, min(page, total_pages - 1))
+            sess.current_page = page
 
-        # Delivery Mode quick toggle row (Proposal 1 Option A)
+            start_idx = page * PAGE_SIZE
+            end_idx = min(start_idx + PAGE_SIZE, total_children)
+            page_children = active_children[start_idx:end_idx]
+
+            for ch_h in page_children:
+                ch = sess.folder_info["dirs"].get(ch_h)
+                if not ch:
+                    continue
+                raw_name = ch["name"]
+                disp_name = (raw_name[:20] + "…") if len(raw_name) > 20 else raw_name
+                tot = ch.get("total_files", 0)
+                sz_str = format_bytes(ch.get("total_size", 0))
+                btn_text = f"📂 {disp_name} ({tot} • {sz_str})"
+                buttons.append([Button.inline(btn_text, data=f"m_cd:{sess.session_id}:{ch_h}")])
+
+            if total_pages > 1:
+                nav_row = []
+                if page > 0:
+                    nav_row.append(Button.inline("⬅️ Prev", data=f"m_cpage:{sess.session_id}:{page - 1}"))
+                nav_row.append(Button.inline(f"📄 {page + 1}/{total_pages}", data=f"m_cpage:{sess.session_id}:{page}"))
+                if page < total_pages - 1:
+                    nav_row.append(Button.inline("Next ➡️", data=f"m_cpage:{sess.session_id}:{page + 1}"))
+                buttons.append(nav_row)
+
+        # 2. Download Action Buttons for THIS folder (Recursive)
+        act_row1 = []
+        if num_v > 0:
+            act_row1.append(Button.inline(f"🎬 Videos ({num_v})", data=f"m_act:{sess.session_id}:{dir_h}:video"))
+        if num_p > 0:
+            act_row1.append(Button.inline(f"🖼️ Photos ({num_p})", data=f"m_act:{sess.session_id}:{dir_h}:photo"))
+        if act_row1:
+            buttons.append(act_row1)
+
+        act_row2 = []
+        if num_o > 0:
+            act_row2.append(Button.inline(f"📄 Others ({num_o})", data=f"m_act:{sess.session_id}:{dir_h}:other"))
+        if tot_files > 0:
+            scope_label = "This Folder" if dir_h != root_h else "Full Share"
+            act_row2.append(Button.inline(f"📁 Download {scope_label} ({tot_files})", data=f"m_act:{sess.session_id}:{dir_h}:all"))
+        if act_row2:
+            buttons.append(act_row2)
+
+        # 3. Hierarchy Navigation Buttons (Up / Parent & Root)
+        parent_h = d.get("p")
+        nav_controls = []
+        if parent_h and parent_h in sess.folder_info["dirs"] and dir_h != root_h:
+            nav_controls.append(Button.inline("⬆️ Parent Folder", data=f"m_cd:{sess.session_id}:{parent_h}"))
+        if dir_h != root_h:
+            nav_controls.append(Button.inline("🏠 Root Folder", data=f"m_cd:{sess.session_id}:{root_h}"))
+        if nav_controls:
+            buttons.append(nav_controls)
+
+        # 4. Utilities Row (Delivery Mode Toggle & Search)
         deliv_mode = await db.get_user_delivery_mode(sess.user_id)
-        deliv_label = "🛡️ Mode: Channel Only (Vault)" if deliv_mode == "channel" else "📬 Mode: Channel + Bot DM"
+        deliv_label = "🛡️ Mode: Channel Only" if deliv_mode == "channel" else "📬 Mode: Channel + DM"
         buttons.append([
-            Button.inline(f"{deliv_label} 🔄", data=f"m_togdeliv:{sess.session_id}")
+            Button.inline(f"{deliv_label} 🔄", data=f"m_togdeliv:{sess.session_id}"),
+            Button.inline("🔍 Search by Name", data=f"m_srch:{sess.session_id}"),
         ])
 
-        # Action row
-        buttons.append([
-            Button.inline("🔍 Search by Name", data=f"m_srch:{sess.session_id}"),
-            Button.inline("🌐 Global Download Hub", data=f"m_home:{sess.session_id}"),
-        ])
+        # 5. Cancel Button
         buttons.append([Button.inline("❌ Cancel", data=f"m_cancel:{sess.session_id}")])
 
         await self.safe_edit_view(sess, text, buttons, event=event)
 
+    # Backward compatibility helpers
+    async def render_explorer(self, sess: MegaSession, page: int = 0, event=None):
+        await self.render_folder(sess, dir_h=sess.folder_info.get("root_h"), page=page, event=event)
+
     async def render_folder_details(self, sess: MegaSession, dir_h: str, event=None):
-        """Render breakdown (videos vs photos) for a selected subfolder with selective download buttons."""
-        sess.last_active = time.time()
-        sess.current_dir_h = dir_h
-        d = sess.folder_info["dirs"].get(dir_h)
-        if not d:
-            await self.render_explorer(sess, page=sess.current_page, event=event)
-            return
+        await self.render_folder(sess, dir_h=dir_h, page=0, event=event)
 
-        folder_name = d["name"]
-        num_v = len(d["videos"])
-        num_p = len(d["photos"])
-        num_o = len(d["others"])
-        tot_files = d["total_files"]
-        tot_size = format_bytes(d["total_size"])
-
-        v_size = format_bytes(sum(f["size"] for f in d["videos"]))
-        p_size = format_bytes(sum(f["size"] for f in d["photos"]))
-        o_size = format_bytes(sum(f["size"] for f in d["others"]))
-
-        text = (
-            f"📂 **Subfolder**: `{folder_name}`\n\n"
-            f"📊 **Content**: `{tot_files} Files` • `{tot_size}`\n"
-        )
-        if num_v > 0:
-            text += f"• 🎬 **Videos**: `{num_v} Files` (~`{v_size}`)\n"
-        if num_p > 0:
-            text += f"• 🖼️ **Photos**: `{num_p} Files` (~`{p_size}`)\n"
-        if num_o > 0:
-            text += f"• 📄 **Others**: `{num_o} Files` (~`{o_size}`)\n"
-
-        text += "\n👇 **Aapko is folder mein se kya download karna hai?**"
-
-        buttons = []
-        row1 = []
-        if num_v > 0:
-            row1.append(Button.inline(f"🎬 Videos Only ({num_v})", data=f"m_act:{sess.session_id}:{dir_h}:video"))
-        if num_p > 0:
-            row1.append(Button.inline(f"🖼️ Photos Only ({num_p})", data=f"m_act:{sess.session_id}:{dir_h}:photo"))
-        if row1:
-            buttons.append(row1)
-
-        row2 = []
-        if num_o > 0:
-            row2.append(Button.inline(f"📄 Others ({num_o})", data=f"m_act:{sess.session_id}:{dir_h}:other"))
-        row2.append(Button.inline(f"📁 Download Full Folder ({tot_files})", data=f"m_act:{sess.session_id}:{dir_h}:all"))
-        buttons.append(row2)
-
-        buttons.append([
-            Button.inline("🔙 Back to Subfolders", data=f"m_nav:{sess.session_id}:{sess.current_page}"),
-            Button.inline("❌ Cancel", data=f"m_cancel:{sess.session_id}")],
-        )
-
-        await self.safe_edit_view(sess, text, buttons, event=event)
+    async def render_home(self, sess: MegaSession, event=None):
+        await self.render_folder(sess, dir_h=sess.folder_info.get("root_h"), page=0, event=event)
 
     async def render_search_results(self, sess: MegaSession, event=None):
-        """Render results from keyword search."""
+        """Render results from global keyword search across all depths."""
         sess.last_active = time.time()
         matches = sess.search_results or []
         if not matches:
             text = (
                 f"🔍 **Search Results for** `\"{sess.search_query}\"`\n\n"
                 f"❌ Koi matching folder nahi mila.\n\n"
-                f"💡 _Try searching with a shorter keyword or check spelling._"
+                f"💡 _Try searching with another keyword or check spelling._"
             )
             buttons = [
                 [Button.inline("🔍 Try Another Search", data=f"m_srch:{sess.session_id}")],
-                [Button.inline("🔙 Back to All Folders", data=f"m_nav:{sess.session_id}:0")],
+                [Button.inline("🔙 Back to Folder", data=f"m_cd:{sess.session_id}:{sess.current_dir_h}")],
                 [Button.inline("❌ Cancel", data=f"m_cancel:{sess.session_id}")],
             ]
             await self.safe_edit_view(sess, text, buttons, event=event)
@@ -896,68 +980,27 @@ class MegaExplorerManager:
         text = (
             f"🔍 **Search Results for** `\"{sess.search_query}\"`\n"
             f"Found **{len(matches)}** matching folder(s):\n\n"
-            f"👇 Click any folder to choose its videos & photos:"
+            f"👇 Click any folder to explore or download:"
         )
         buttons = []
         for sf_h in matches[:8]:
             d = sess.folder_info["dirs"][sf_h]
-            raw_name = d["name"]
-            disp_name = (raw_name[:20] + "…") if len(raw_name) > 20 else raw_name
-            tot = d["total_files"]
-            sz_str = format_bytes(d["total_size"])
-            buttons.append([Button.inline(f"📂 {disp_name} ({tot} • {sz_str})", data=f"m_dir:{sess.session_id}:{sf_h}")])
+            path_str = d.get("path") or d["name"]
+            disp_path = (path_str[:26] + "…") if len(path_str) > 26 else path_str
+            tot = d.get("total_files", 0)
+            sz_str = format_bytes(d.get("total_size", 0))
+            buttons.append([Button.inline(f"📂 {disp_path} ({tot} • {sz_str})", data=f"m_cd:{sess.session_id}:{sf_h}")])
 
         buttons.append([
             Button.inline("🔍 Search Again", data=f"m_srch:{sess.session_id}"),
-            Button.inline("🔙 All Folders", data=f"m_nav:{sess.session_id}:0"),
+            Button.inline("🔙 Back to Explorer", data=f"m_cd:{sess.session_id}:{sess.current_dir_h}"),
         ])
         buttons.append([Button.inline("❌ Cancel", data=f"m_cancel:{sess.session_id}")])
 
         await self.safe_edit_view(sess, text, buttons, event=event)
 
-    async def render_home(self, sess: MegaSession, event=None):
-        """Render global view of the entire share."""
-        sess.last_active = time.time()
-        info = sess.folder_info
-        num_folders = len(info["top_subfolders"])
-        tot_files = info["total_files"]
-        tot_size = format_bytes(info["total_size"])
-
-        num_v = len(info["videos"])
-        num_p = len(info["photos"])
-        num_o = len(info["others"])
-
-        v_sz = format_bytes(sum(f["size"] for f in info["videos"]))
-        p_sz = format_bytes(sum(f["size"] for f in info["photos"]))
-
-        text = (
-            f"🌐 **Mega Share Global Hub**\n\n"
-            f"📊 **Total Content**: `{num_folders} Subfolders` • `{tot_files} Files` • `{tot_size}`\n"
-            f"• 🎬 **All Videos**: `{num_v} Files` (~`{v_sz}`)\n"
-            f"• 🖼️ **All Photos**: `{num_p} Files` (~`{p_sz}`)\n\n"
-            f"📁 *Folder-by-Folder Sequential Mode: Pehle Folder 1 pura hoga, fir Folder 2!*\n\n"
-            f"👇 **Neeche option chunne par direct sequential download shuru hoga:**"
-        )
-
-        deliv_mode = await db.get_user_delivery_mode(sess.user_id)
-        deliv_label = "🛡️ Mode: Channel Only (Vault)" if deliv_mode == "channel" else "📬 Mode: Channel + Bot DM"
-        buttons = [
-            [Button.inline(f"{deliv_label} 🔄", data=f"m_togdeliv:{sess.session_id}")],
-            [Button.inline(f"🎬 Download All Videos ({num_v}) [Sequential]", data=f"m_allact:{sess.session_id}:video")],
-            [Button.inline(f"📁 Download Everything ({tot_files}) [Sequential]", data=f"m_allact:{sess.session_id}:all")],
-            [
-                Button.inline(f"🖼️ Photos ({num_p})", data=f"m_allact:{sess.session_id}:photo"),
-                Button.inline("🔍 Search Folder", data=f"m_srch:{sess.session_id}"),
-            ],
-            [Button.inline(f"🗂️ Browse Subfolders ({num_folders})", data=f"m_nav:{sess.session_id}:0")],
-            [Button.inline("❌ Cancel", data=f"m_cancel:{sess.session_id}")],
-        ]
-
-        await self.safe_edit_view(sess, text, buttons, event=event)
-
     async def handle_callback(self, event: events.CallbackQuery.Event, client, active_tasks: dict):
         """Unified callback handler for all Mega explorer events."""
-        # 1. Immediately acknowledge Telegram callback so loading spinner clears
         try:
             await event.answer()
         except Exception:
@@ -985,25 +1028,25 @@ class MegaExplorerManager:
 
         sess.last_active = time.time()
 
-        if action_prefix == "m_nav":
-            page = int(parts[2]) if len(parts) > 2 else 0
-            await self.render_explorer(sess, page=page, event=event)
+        if action_prefix in ("m_cd", "m_dir"):
+            dir_h = parts[2] if len(parts) > 2 else sess.folder_info.get("root_h")
+            await self.render_folder(sess, dir_h=dir_h, page=0, event=event)
 
-        elif action_prefix == "m_dir":
-            dir_h = parts[2]
-            await self.render_folder_details(sess, dir_h, event=event)
+        elif action_prefix in ("m_cpage", "m_nav"):
+            page = int(parts[2]) if len(parts) > 2 else 0
+            await self.render_folder(sess, dir_h=sess.current_dir_h, page=page, event=event)
 
         elif action_prefix == "m_home":
-            await self.render_home(sess, event=event)
+            await self.render_folder(sess, dir_h=sess.folder_info.get("root_h"), page=0, event=event)
 
         elif action_prefix == "m_srch":
             sess.awaiting_search = True
             text = (
-                f"🔍 **Search Mega Subfolder**\n\n"
-                f"Aapko kaunsa folder chahiye? Chat mein folder ka naam ya keyword bhejo (e.g., `VIP`, `Autumn`, `Thompson`):"
+                f"🔍 **Search Mega Subfolders (All Depths)**\n\n"
+                f"Aapko kaunsa folder chahiye? Chat mein folder ka naam ya keyword bhejo (e.g., `VIP`, `Season`, `Episode`):"
             )
             buttons = [
-                [Button.inline("🔙 Back to Explorer", data=f"m_nav:{sess.session_id}:{sess.current_page}")],
+                [Button.inline("🔙 Back to Folder", data=f"m_cd:{sess.session_id}:{sess.current_dir_h}")],
                 [Button.inline("❌ Cancel", data=f"m_cancel:{sess.session_id}")],
             ]
             await self.safe_edit_view(sess, text, buttons, event=event)
@@ -1032,7 +1075,7 @@ class MegaExplorerManager:
             except Exception:
                 pass
             if not sess.future.done():
-                sess.future.set_result((act_type, None))
+                sess.future.set_result((act_type, sess.folder_info.get("root_h")))
 
         elif action_prefix == "m_togdeliv":
             curr_mode = await db.get_user_delivery_mode(sess.user_id)
@@ -1043,22 +1086,17 @@ class MegaExplorerManager:
                 await event.answer(f"✅ Mode switched to: {mode_text}", alert=False)
             except Exception:
                 pass
-            if sess.current_dir_h:
-                await self.render_folder_details(sess, sess.current_dir_h, event=event)
-            else:
-                await self.render_explorer(sess, page=sess.current_page, event=event)
+            await self.render_folder(sess, dir_h=sess.current_dir_h, page=sess.current_page, event=event)
 
         elif action_prefix == "m_reopen":
             try:
                 await event.answer("🔄 Reopening Mega Subfolder Explorer...")
             except Exception:
                 pass
-            # Reopen session for downloading another folder from the same link
             sess.future = asyncio.get_running_loop().create_future()
             sess.status_msg = await event.reply("🔍 **Loading Mega Subfolder Explorer...**", buttons=make_stop_btn(sess.user_id))
-            await self.render_explorer(sess, page=sess.current_page)
+            await self.render_folder(sess, dir_h=sess.current_dir_h or sess.folder_info.get("root_h"), page=0)
 
-            # Spawn downloader task for the reopened selection
             task = asyncio.create_task(
                 execute_session_download(
                     event=event,
@@ -1067,7 +1105,6 @@ class MegaExplorerManager:
                 )
             )
             active_tasks[sess.user_id] = task
-
 
 
 mega_mgr = MegaExplorerManager()
@@ -1107,15 +1144,19 @@ async def execute_session_download(
     # Determine targeted nodes
     if chosen_dir_h:
         target_dir = folder_info["dirs"].get(chosen_dir_h)
-        folder_display_name = target_dir["name"] if target_dir else "Subfolder"
+        folder_display_name = (target_dir.get("path") or target_dir.get("name")) if target_dir else "Subfolder"
         if chosen_action == "video":
-            selected_nodes = target_dir["videos"]
+            selected_nodes = target_dir.get("all_videos", target_dir.get("videos", []))
         elif chosen_action == "photo":
-            selected_nodes = target_dir["photos"]
+            selected_nodes = target_dir.get("all_photos", target_dir.get("photos", []))
         elif chosen_action == "other":
-            selected_nodes = target_dir["others"]
+            selected_nodes = target_dir.get("all_others", target_dir.get("others", []))
         else:
-            selected_nodes = target_dir["videos"] + target_dir["photos"] + target_dir["others"]
+            selected_nodes = (
+                target_dir.get("all_videos", target_dir.get("videos", []))
+                + target_dir.get("all_photos", target_dir.get("photos", []))
+                + target_dir.get("all_others", target_dir.get("others", []))
+            )
     else:
         folder_display_name = "Global Share"
         if chosen_action == "video":
@@ -1697,8 +1738,10 @@ async def process_mega_link(
             if folder_info and folder_info["total_files"] > 0:
                 top_subfolders = folder_info.get("top_subfolders", [])
 
-                # CASE A: MULTI-SUBFOLDER SHARE (e.g. 53 Subfolders, 20 GB)
-                if len(top_subfolders) > 1:
+                has_subfolders = folder_info.get("has_subfolders", False)
+
+                # CASE A: SUBFOLDERS FOUND (Any depth: 1 subfolder, 50 subfolders, or nested)
+                if has_subfolders:
                     session_id = uuid.uuid4().hex[:8]
                     sess = MegaSession(
                         session_id=session_id,
@@ -1714,8 +1757,8 @@ async def process_mega_link(
                     raw_text = event.raw_text
                     words = [w.lower() for w in raw_text.split() if not is_mega_url(w)]
                     matched_sf_h = None
-                    for sf_h in top_subfolders:
-                        sf_name = folder_info["dirs"][sf_h]["name"].lower()
+                    for sf_h, d in folder_info["dirs"].items():
+                        sf_name = d["name"].lower()
                         clean_name = re.sub(r"\[.*?\]|\(.*?\)", "", sf_name).strip()
                         if any(w in clean_name or clean_name in w for w in words if len(w) > 2):
                             matched_sf_h = sf_h
@@ -1729,10 +1772,10 @@ async def process_mega_link(
                         elif any(w in words for w in ["other", "others"]):
                             sess.future.set_result(("other", matched_sf_h))
                         else:
-                            await mega_mgr.render_folder_details(sess, matched_sf_h)
+                            await mega_mgr.render_folder(sess, dir_h=matched_sf_h, page=0)
                     else:
-                        # Open the Subfolder Explorer on page 0
-                        await mega_mgr.render_explorer(sess, page=0)
+                        # Open the Interactive Folder Explorer starting at root_h
+                        await mega_mgr.render_folder(sess, dir_h=folder_info.get("root_h"), page=0)
 
                     # Execute session download loop
                     await execute_session_download(
@@ -1742,7 +1785,7 @@ async def process_mega_link(
                     )
                     return
 
-                # CASE B: FLAT FOLDER (1 or 0 subfolders)
+                # CASE B: FLAT FOLDER (0 subfolders, all files directly in root)
                 elif folder_info["total_files"] > 1:
                     raw_count = folder_info["total_files"]
                     num_videos = len(folder_info["videos"])
