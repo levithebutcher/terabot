@@ -106,7 +106,10 @@ class TeraBoxDownloader:
                                     elapsed = now - progress_tracker["last_time"]
 
                                     if elapsed >= 1.0 or progress_tracker["downloaded"] >= total_size:
-                                        speed = progress_tracker["recent_bytes"] / elapsed if elapsed > 0 else 0.0
+                                        instant = progress_tracker["recent_bytes"] / elapsed if elapsed > 0 else 0.0
+                                        last_spd = progress_tracker.get("smoothed_speed", 0.0)
+                                        speed = (0.7 * instant + 0.3 * last_spd) if last_spd > 0 else instant
+                                        progress_tracker["smoothed_speed"] = speed
                                         progress_tracker["last_time"] = now
                                         progress_tracker["recent_bytes"] = 0
                                         if progress_callback:
@@ -240,6 +243,7 @@ class TeraBoxDownloader:
                 with open(part_path, mode) as f:
                     last_time = time.monotonic()
                     bytes_since_last = 0
+                    smoothed_speed = 0.0
 
                     async for chunk in response.content.iter_chunked(self.CHUNK_SIZE):
                         if not chunk:
@@ -252,13 +256,14 @@ class TeraBoxDownloader:
                         now = time.monotonic()
                         elapsed = now - last_time
                         if progress_callback and (elapsed >= 1.0 or downloaded_so_far == total_size):
-                            speed = bytes_since_last / elapsed if elapsed > 0 else 0.0
+                            instant = bytes_since_last / elapsed if elapsed > 0 else 0.0
+                            smoothed_speed = (0.7 * instant + 0.3 * smoothed_speed) if smoothed_speed > 0 else instant
                             last_time = now
                             bytes_since_last = 0
                             if asyncio.iscoroutinefunction(progress_callback):
-                                await progress_callback(downloaded_so_far, total_size, speed)
+                                await progress_callback(downloaded_so_far, total_size, smoothed_speed)
                             else:
-                                progress_callback(downloaded_so_far, total_size, speed)
+                                progress_callback(downloaded_so_far, total_size, smoothed_speed)
 
                 actual_downloaded = part_path.stat().st_size
                 if total_size > 0 and actual_downloaded != total_size:

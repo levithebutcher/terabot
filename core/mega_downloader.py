@@ -75,13 +75,13 @@ def render_mega_progress(
     total: int,
     speed: float,
     folder_header: str = "",
+    file_prefix: str = "",
     skipped_count: int = 0,
 ) -> str:
-    """Render a clean progress bar string matching the user's layout without broken markdown tags."""
+    """Render a bold, clear, standardized transfer card for Telegram progress edits."""
     bar_width = 12
     speed_mb = speed / (1024 * 1024) if speed > 0 else 0.0
     clean_action = action.replace("**", "").strip()
-    skipped_line = f"⏩ **Skipped**: `{skipped_count} file(s)` (already saved)\n" if skipped_count > 0 else ""
 
     if total > 0:
         percent = (current / total) * 100.0
@@ -90,29 +90,30 @@ def render_mega_progress(
         remaining = max(0, total - current)
         eta = remaining / speed if speed > 0 else 0
         eta_str = format_duration(eta)
-
-        folder_block = f"{folder_header.strip()}\n" if folder_header.strip() else ""
-        divider = "----------------------------------------------\n" if folder_block else ""
-
-        return (
-            f"[{bar}] **{percent:.1f}%** ({format_bytes(current)} / {format_bytes(total)}) • `{speed_mb:.2f} MB/s`\n\n"
-            f"{folder_block}"
-            f"{divider}"
-            f"⚡ **Status**: {clean_action}: `{name}`\n"
-            f"{skipped_line}"
-            f"⏱ **ETA**: `{eta_str}`"
-        )
     else:
-        folder_block = f"{folder_header.strip()}\n" if folder_header.strip() else ""
-        divider = "----------------------------------------------\n" if folder_block else ""
-        return (
-            f"⚡ `{speed_mb:.2f} MB/s` • **Downloaded**: `{format_bytes(current)}`\n\n"
-            f"{folder_block}"
-            f"{divider}"
-            f"⚡ **Status**: {clean_action}: `{name}`\n"
-            f"{skipped_line}"
-            f"⏳ *Streaming high-speed chunks from Mega...*"
-        )
+        percent = 0.0
+        bar = "▱" * bar_width
+        eta_str = "--:--"
+
+    lines = [
+        f"**{clean_action}**\n",
+    ]
+
+    prefix_str = f"`{file_prefix.strip()}` " if file_prefix and file_prefix.strip() else ""
+    lines.append(f"🎬 **File**: {prefix_str}`{name}`")
+
+    if folder_header and folder_header.strip():
+        lines.append(f"{folder_header.strip()}")
+
+    lines.extend([
+        f"[{bar}] **{percent:.1f}%** (`{format_bytes(current)}` / `{format_bytes(total)}`)",
+        f"⚡ **Speed**: `{speed_mb:.2f} MB/s` • ⏱ **ETA**: `{eta_str}`",
+    ])
+
+    if skipped_count > 0:
+        lines.append(f"⏩ **Skipped**: `{skipped_count} file(s)` (already in storage)")
+
+    return "\n".join(lines)
 
 
 
@@ -565,7 +566,10 @@ async def _download_mega_range_chunk(
                                 now = time.monotonic()
                                 elapsed = now - progress_tracker["last_time"]
                                 if elapsed >= 1.2 or progress_tracker["downloaded"] >= total_size:
-                                    speed = progress_tracker["recent_bytes"] / elapsed if elapsed > 0 else 0.0
+                                    instant = progress_tracker["recent_bytes"] / elapsed if elapsed > 0 else 0.0
+                                    last_spd = progress_tracker.get("smoothed_speed", 0.0)
+                                    speed = (0.7 * instant + 0.3 * last_spd) if last_spd > 0 else instant
+                                    progress_tracker["smoothed_speed"] = speed
                                     progress_tracker["last_time"] = now
                                     progress_tracker["recent_bytes"] = 0
                                     if progress_callback:
@@ -682,8 +686,9 @@ async def download_mega_node_stream(
                 return False
 
             downloaded_bytes = 0
-            last_callback_time = 0.0
-            start_time = time.monotonic()
+            last_callback_time = time.monotonic()
+            last_callback_bytes = 0
+            smoothed_speed = 0.0
 
             with open(dest_path, "wb") as f:
                 async for chunk in stream_resp.content.iter_chunked(512 * 1024):
@@ -698,10 +703,14 @@ async def download_mega_node_stream(
                     downloaded_bytes += len(plain_chunk)
 
                     now = time.monotonic()
-                    if progress_callback and (now - last_callback_time >= 1.5 or downloaded_bytes >= target_size):
+                    elapsed = now - last_callback_time
+                    if progress_callback and (elapsed >= 1.5 or downloaded_bytes >= target_size):
+                        bytes_diff = downloaded_bytes - last_callback_bytes
+                        instant = bytes_diff / elapsed if elapsed > 0 else 0.0
+                        smoothed_speed = (0.7 * instant + 0.3 * smoothed_speed) if smoothed_speed > 0 else instant
                         last_callback_time = now
-                        speed = downloaded_bytes / (now - start_time) if (now - start_time) > 0 else 0.0
-                        await progress_callback(downloaded_bytes, target_size, speed)
+                        last_callback_bytes = downloaded_bytes
+                        await progress_callback(downloaded_bytes, target_size, smoothed_speed)
 
         return dest_path.exists() and dest_path.stat().st_size == target_size
     except Exception as e:
@@ -1509,15 +1518,16 @@ async def stream_and_upload_nodes(
                     async def dl_progress(current: int, total: int, speed: float):
                         nonlocal last_dl_edit
                         now = time.monotonic()
-                        if now - last_dl_edit >= 2.0 or current == total:
+                        if now - last_dl_edit >= 1.5 or current == total:
                             last_dl_edit = now
                             txt = render_mega_progress(
-                                action=f"📥 {file_prefix}Downloading from Mega",
+                                action="📥 DOWNLOADING FROM MEGA [Step 1/2]",
                                 name=file_name,
                                 current=current,
                                 total=total,
                                 speed=speed,
                                 folder_header=folder_header,
+                                file_prefix=file_prefix,
                                 skipped_count=skipped_count,
                             )
                             try:
@@ -1566,6 +1576,22 @@ async def stream_and_upload_nodes(
                     # Standalone media upload (Videos > 20MB, Documents, Archives, or Single Files)
                     await flush_album()
 
+                    # INSTANTANEOUS SWITCH TO UPLOADING (0%) - Direct switch without frozen 100% download!
+                    try:
+                        init_up_txt = render_mega_progress(
+                            action="📤 UPLOADING TO TELEGRAM [Step 2/2]",
+                            name=dest_path.name,
+                            current=0,
+                            total=actual_size,
+                            speed=0.0,
+                            folder_header=folder_header,
+                            file_prefix=file_prefix,
+                            skipped_count=skipped_count,
+                        )
+                        await status_msg.edit(init_up_txt, buttons=make_stop_btn(user_id))
+                    except Exception:
+                        pass
+
                     thumb_path = None
                     if is_video_file(dest_path):
                         try:
@@ -1581,15 +1607,16 @@ async def stream_and_upload_nodes(
                     async def upload_progress(current: int, total: int, speed: float):
                         nonlocal last_upload_edit
                         now = time.monotonic()
-                        if now - last_upload_edit >= 2.0 or current == total:
+                        if now - last_upload_edit >= 1.5 or current == total:
                             last_upload_edit = now
                             txt = render_mega_progress(
-                                action=f"📤 {file_prefix}Uploading to Telegram",
+                                action="📤 UPLOADING TO TELEGRAM [Step 2/2]",
                                 name=dest_path.name,
                                 current=current,
                                 total=total,
                                 speed=speed,
                                 folder_header=folder_header,
+                                file_prefix=file_prefix,
                                 skipped_count=skipped_count,
                             )
                             try:
@@ -1893,7 +1920,7 @@ async def process_mega_link(
         else:
             cmd = base_cmd + ["--path", str(local_dir), engine_url]
 
-        await status_msg.edit(f"📥 **Downloading from Mega...**\n`Engine: {engine_name}`", buttons=make_stop_btn(user_id))
+        await status_msg.edit(f"**📥 DOWNLOADING FROM MEGA [Step 1/2]**\n`Engine: {engine_name}`", buttons=make_stop_btn(user_id))
 
         process = await asyncio.create_subprocess_exec(
             *cmd,
@@ -1930,10 +1957,10 @@ async def process_mega_link(
             async def upload_progress_cli(current: int, total: int, speed: float):
                 nonlocal last_upload_edit
                 now = time.monotonic()
-                if now - last_upload_edit >= 2.0 or current == total:
+                if now - last_upload_edit >= 1.5 or current == total:
                     last_upload_edit = now
                     txt = render_mega_progress(
-                        action="📤 Uploading to Telegram",
+                        action="📤 UPLOADING TO TELEGRAM [Step 2/2]",
                         name=f.name,
                         current=current,
                         total=total,
@@ -1943,6 +1970,19 @@ async def process_mega_link(
                         await status_msg.edit(txt, buttons=make_stop_btn(user_id))
                     except Exception:
                         pass
+
+            # Immediate instantaneous switch to Uploading (0%)
+            try:
+                init_up_txt = render_mega_progress(
+                    action="📤 UPLOADING TO TELEGRAM [Step 2/2]",
+                    name=f.name,
+                    current=0,
+                    total=file_size,
+                    speed=0.0,
+                )
+                await status_msg.edit(init_up_txt, buttons=make_stop_btn(user_id))
+            except Exception:
+                pass
 
             file_key = f"mg_{abs(hash(f.name + str(file_size)))}"
             caption = f"🎬 `{f.name}` (`{format_bytes(file_size)}`)\n`#{file_key}` `#sz_{file_size}`"

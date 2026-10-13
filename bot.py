@@ -85,14 +85,24 @@ async def notify_admins(text: str):
             logger.warning(f"Failed to alert admin {admin_id}: {e}")
 
 
-def render_progress_text(action: str, filename: str, current: int, total: int, speed: float) -> str:
-    """Render a progress status string for Telegram message edits."""
+def render_progress_text(
+    action: str,
+    filename: str,
+    current: int,
+    total: int,
+    speed: float,
+    file_prefix: str = "",
+) -> str:
+    """Render a bold, clear, standardized transfer card for Telegram progress edits."""
     bar_width = 12
+    speed_mb = speed / (1024 * 1024) if speed > 0 else 0.0
+    clean_action = action.replace("**", "").strip()
+
     if total > 0:
         percent = (current / total) * 100.0
-        filled = int(bar_width * current // total)
+        filled = min(bar_width, int(bar_width * current // total))
         bar = "▰" * filled + "▱" * (bar_width - filled)
-        remaining = total - current
+        remaining = max(0, total - current)
         eta = remaining / speed if speed > 0 else 0
         eta_str = format_duration(eta)
     else:
@@ -100,14 +110,19 @@ def render_progress_text(action: str, filename: str, current: int, total: int, s
         bar = "▱" * bar_width
         eta_str = "--:--"
 
-    speed_mb = speed / (1024 * 1024)
-    return (
-        f"**{action}**: `{filename}`\n\n"
-        f"[{bar}] **{percent:.1f}%**\n"
-        f"⚡ **Speed**: `{speed_mb:.2f} MB/s`\n"
-        f"📦 **Processed**: `{format_bytes(current)}` / `{format_bytes(total)}`\n"
-        f"⏱ **ETA**: `{eta_str}`"
-    )
+    lines = [
+        f"**{clean_action}**\n",
+    ]
+
+    prefix_str = f"`{file_prefix.strip()}` " if file_prefix and file_prefix.strip() else ""
+    lines.append(f"🎬 **File**: {prefix_str}`{filename}`")
+
+    lines.extend([
+        f"[{bar}] **{percent:.1f}%** (`{format_bytes(current)}` / `{format_bytes(total)}`)",
+        f"⚡ **Speed**: `{speed_mb:.2f} MB/s` • ⏱ **ETA**: `{eta_str}`",
+    ])
+
+    return "\n".join(lines)
 
 
 # ---------------- COMMAND HANDLERS ---------------- #
@@ -675,9 +690,10 @@ async def process_terabox_link(
                     filled = min(bar_w, int(bar_w * current // total)) if total > 0 else 0
                     bar = "▰" * filled + "▱" * (bar_w - filled)
                     txt = (
-                        f"📤 **Uploading Album ({album_count} {item_label}) to Telegram**\n\n"
-                        f"[{bar}] **{pct:.1f}%** ({int(current)}/{total} files)\n"
-                        f"⚡ *Sending high-speed album batch...*"
+                        f"**📤 UPLOADING ALBUM TO TELEGRAM [Step 2/2]**\n\n"
+                        f"📦 **Batch**: `{album_count} {item_label}`\n"
+                        f"[{bar}] **{pct:.1f}%** (`{int(current)}/{total} files`)\n"
+                        f"⚡ *Sending high-speed album batch to Telegram...*"
                     )
                     try:
                         asyncio.create_task(status_msg.edit(txt, buttons=make_stop_btn(user_id)))
@@ -686,8 +702,9 @@ async def process_terabox_link(
 
             try:
                 await status_msg.edit(
-                    f"📤 **Uploading Album ({album_count} {item_label}) to Telegram...**\n"
-                    f"⚡ *Processing batch of {album_count} files...*",
+                    f"**📤 UPLOADING ALBUM TO TELEGRAM [Step 2/2]**\n\n"
+                    f"📦 **Batch**: `{album_count} {item_label}`\n"
+                    f"⚡ *Preparing high-speed album batch of {album_count} files...*",
                     buttons=make_stop_btn(user_id),
                 )
                 msgs = await uploader.upload_album(
@@ -826,7 +843,14 @@ async def process_terabox_link(
                     now = time.monotonic()
                     if now - last_edit_time >= 2.0 or current == total:
                         last_edit_time = now
-                        txt = render_progress_text(f"📥 {file_prefix}Downloading", file_obj.file_name, current, total, speed)
+                        txt = render_progress_text(
+                            "📥 DOWNLOADING FROM TERABOX [Step 1/2]",
+                            file_obj.file_name,
+                            current,
+                            total,
+                            speed,
+                            file_prefix=file_prefix,
+                        )
                         try:
                             await status_msg.edit(txt, buttons=make_stop_btn(user_id))
                         except Exception:
@@ -842,6 +866,20 @@ async def process_terabox_link(
                     await status_msg.edit(f"❌ {file_prefix}**Download Failed**: {str(e)}", buttons=None)
                     continue
 
+                # Instant direct switch: download hits 100%, immediately flip to Uploading 0%
+                try:
+                    instant_txt = render_progress_text(
+                        "📤 UPLOADING TO TELEGRAM [Step 2/2]",
+                        file_obj.file_name,
+                        0,
+                        file_obj.size,
+                        0.0,
+                        file_prefix=file_prefix,
+                    )
+                    await status_msg.edit(instant_txt, buttons=make_stop_btn(user_id))
+                except Exception:
+                    pass
+
                 # Upload File Standalone
                 last_upload_edit = 0.0
                 async def upload_progress(current: int, total: int, speed: float):
@@ -849,7 +887,14 @@ async def process_terabox_link(
                     now = time.monotonic()
                     if now - last_upload_edit >= 2.0 or current == total:
                         last_upload_edit = now
-                        txt = render_progress_text(f"📤 {file_prefix}Uploading to Telegram", file_obj.file_name, current, total, speed)
+                        txt = render_progress_text(
+                            "📤 UPLOADING TO TELEGRAM [Step 2/2]",
+                            file_obj.file_name,
+                            current,
+                            total,
+                            speed,
+                            file_prefix=file_prefix,
+                        )
                         try:
                             await status_msg.edit(txt, buttons=make_stop_btn(user_id))
                         except Exception:
@@ -888,7 +933,14 @@ async def process_terabox_link(
                 now = time.monotonic()
                 if now - last_edit_time >= 2.0 or current == total:
                     last_edit_time = now
-                    txt = render_progress_text(f"📥 {file_prefix}Downloading (Album Batch)", file_obj.file_name, current, total, speed)
+                    txt = render_progress_text(
+                        "📥 DOWNLOADING FROM TERABOX (Album Batch) [Step 1/2]",
+                        file_obj.file_name,
+                        current,
+                        total,
+                        speed,
+                        file_prefix=file_prefix,
+                    )
                     try:
                         await status_msg.edit(txt, buttons=make_stop_btn(user_id))
                     except Exception:
