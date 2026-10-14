@@ -82,6 +82,14 @@ FALLBACK_API_KEY: str = os.getenv("FALLBACK_API_KEY", "").strip()
 # Cloudflare Worker / Reverse Proxy URL (Optional, bypasses Cloudflare challenge)
 PROXY_URL: str = os.getenv("PROXY_URL", "").strip().rstrip("/")
 
+# Telegram Mini App (TMA) Configuration
+WEBAPP_URL: str = os.getenv("WEBAPP_URL", "").strip().rstrip("/")
+WEBAPP_PORT_RAW = os.getenv("PORT", os.getenv("WEBAPP_PORT", "8080")).strip()
+try:
+    WEBAPP_PORT: int = int(WEBAPP_PORT_RAW)
+except ValueError:
+    WEBAPP_PORT = 8080
+
 # File Paths
 DOWNLOAD_DIR: Path = BASE_DIR / os.getenv("DOWNLOAD_DIR", "downloads")
 DOWNLOAD_DIR.mkdir(parents=True, exist_ok=True)

@@ -945,6 +945,19 @@ class MegaExplorerManager:
 
         buttons = []
 
+        # ---------------- TELEGRAM MINI APP BUTTON ----------------
+        if getattr(config, "WEBAPP_URL", ""):
+            webapp_url = f"{config.WEBAPP_URL.rstrip('/')}/webapp?session_id={sess.session_id}"
+            try:
+                from telethon.tl import types
+                webapp_btn = types.KeyboardInlineButton(
+                    text="📱 Open in Mini App (Full Explorer)",
+                    type=types.InlineButtonTypeWebView(url=webapp_url),
+                )
+            except Exception:
+                webapp_btn = Button.url("📱 Open in Mini App", webapp_url)
+            buttons.append([webapp_btn])
+
         # ---------------- PAGINATION (10 ITEMS PER PAGE) ----------------
         PAGE_SIZE = 10
         total_items = len(display_items)
@@ -1264,6 +1277,18 @@ async def execute_session_download(
             return
         selected_nodes = [target_node]
         folder_display_name = target_node.get("folder_name") or target_node.get("name", "Single File")
+    elif chosen_action == "multi":
+        handle_list = set(chosen_dir_h) if isinstance(chosen_dir_h, (list, set, tuple)) else {chosen_dir_h}
+        all_nodes = folder_info.get("nodes") or (
+            folder_info.get("videos", []) + folder_info.get("photos", []) + folder_info.get("others", [])
+        )
+        node_map = {n.get("h"): n for n in all_nodes if n.get("h")}
+        for d in folder_info.get("dirs", {}).values():
+            for f in d.get("direct_videos", []) + d.get("direct_photos", []) + d.get("direct_others", []):
+                if f.get("h"):
+                    node_map[f["h"]] = f
+        selected_nodes = [node_map[h] for h in handle_list if h in node_map]
+        folder_display_name = f"Selected {len(selected_nodes)} file(s)"
     elif chosen_dir_h:
         target_dir = folder_info["dirs"].get(chosen_dir_h)
         folder_display_name = (target_dir.get("path") or target_dir.get("name")) if target_dir else "Subfolder"

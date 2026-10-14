@@ -26,6 +26,7 @@ from core.resolver import (
     TeraFile,
 )
 from core.uploader import TelethonUploader
+from core.webapp_server import start_webapp_server, stop_webapp_server
 from core.mega_downloader import (
     is_mega_url,
     process_mega_link,
@@ -1228,31 +1229,15 @@ async def handle_incoming_message(event: events.NewMessage.Event):
             del active_tasks[user_id]
 
 
-async def start_dummy_web_server():
-    """Start an optional dummy HTTP health server for cloud platforms (Render, Koyeb, HF)."""
-    port_str = os.getenv("PORT")
-    if not port_str:
-        return
-    try:
-        from aiohttp import web
-        app = web.Application()
-        app.router.add_get("/", lambda r: web.Response(text="TeraBox Bot is running!"))
-        app.router.add_get("/health", lambda r: web.Response(text="OK"))
-        runner = web.AppRunner(app)
-        await runner.setup()
-        site = web.TCPSite(runner, "0.0.0.0", int(port_str))
-        await site.start()
-        logger.info(f"Cloud health-check web server started on port {port_str}")
-    except Exception as e:
-        logger.warning(f"Could not start dummy web server on port {port_str}: {e}")
-
-
 # ---------------- STARTUP & SHUTDOWN ---------------- #
 
 async def main():
     cleanup_leftover_parts()
     await db.init_db()
-    await start_dummy_web_server()
+    try:
+        await start_webapp_server()
+    except Exception as e:
+        logger.warning(f"Could not start Telegram Mini App web server: {e}")
 
     logger.info("Starting Telegram Bot via Telethon...")
     if not config.BOT_TOKEN:
@@ -1281,6 +1266,8 @@ async def main():
         except Exception as e:
             logger.warning(f"Connection interrupted ({e}). Reconnecting in 3 seconds...", exc_info=True)
             await asyncio.sleep(3)
+        finally:
+            await stop_webapp_server()
 
 
 if __name__ == "__main__":
