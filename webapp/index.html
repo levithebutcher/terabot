@@ -29,15 +29,45 @@
         <div class="brand-text">
           <div class="brand-title">TeraBot Explorer</div>
           <div class="brand-subtitle">
-            <span class="status-dot"></span>
-            <span id="networkStatus">Telegram Cloud</span>
+            <span class="status-dot" id="statusDot"></span>
+            <span id="networkStatus">Connecting...</span>
           </div>
         </div>
       </div>
       <div class="top-actions">
+        <button class="settings-icon-btn" onclick="openApiConfigModal()" title="API Backend Settings">⚙️</button>
         <div id="statCounter" class="stats-pill">
           <span>0 Files</span>
         </div>
+      </div>
+    </div>
+
+    <!-- Direct Cloud Link Explorer Bar -->
+    <div class="link-input-section" id="linkInputSection">
+      <div class="link-input-wrapper">
+        <span class="link-prefix-icon">🔗</span>
+        <input 
+          type="url" 
+          id="cloudUrlInput" 
+          class="cloud-url-input" 
+          placeholder="Paste TeraBox or Mega link to explore & download..." 
+          autocomplete="off" 
+          spellcheck="false"
+          onkeydown="if(event.key==='Enter') handleExploreUrl()"
+        />
+        <button id="pasteUrlBtn" class="paste-url-btn" onclick="handlePasteUrl()" title="Paste from clipboard">
+          📋 Paste
+        </button>
+        <button id="exploreUrlBtn" class="explore-url-btn" onclick="handleExploreUrl()">
+          <span id="exploreBtnLabel">⚡ Explore</span>
+          <div id="exploreSpinner" class="spinner-inline hidden"></div>
+        </button>
+      </div>
+      <div class="quick-samples-row">
+        <span class="sample-label">Quick:</span>
+        <button class="sample-chip" onclick="loadSampleDemo()">🎮 Demo View</button>
+        <button class="sample-chip" onclick="openApiConfigModal()">⚙️ Server API</button>
+        <span id="backendBadge" class="backend-badge checking">API Checking...</span>
       </div>
     </div>
 
@@ -99,16 +129,19 @@
     </div>
   </main>
 
-  <!-- Floating Sticky Action Bar (Desktop / Fallback) -->
+  <!-- Floating Sticky Action Bar -->
   <div id="bottomBar" class="floating-bar">
     <div class="bar-info">
       <div id="barCount" class="bar-count">0 Selected</div>
       <div id="barSize" class="bar-size">0 MB Total</div>
     </div>
     <div class="bar-buttons">
-      <button class="clear-selection-btn" onclick="clearAllSelections()">✕ Clear</button>
-      <button id="downloadBtn" class="download-cta-btn" onclick="submitDownload()">
-        <span>🚀 Download</span>
+      <button class="clear-selection-btn" onclick="clearAllSelections()" title="Deselect All">✕ Clear</button>
+      <button id="directDownloadBtn" class="direct-download-btn" onclick="handleDirectDownload()" title="Get Direct Download Links">
+        <span>📥 Direct Link</span>
+      </button>
+      <button id="downloadBtn" class="download-cta-btn" onclick="submitDownload()" title="Send to Telegram Bot">
+        <span>🚀 Send to Bot</span>
       </button>
     </div>
   </div>
@@ -142,7 +175,43 @@
           <div id="modalFileHandle" class="modal-val">--</div>
         </div>
       </div>
+      <div id="modalActionArea" class="modal-action-row"></div>
       <button class="modal-close-btn" onclick="closeDetailModal()">Done</button>
+    </div>
+  </div>
+
+  <!-- Direct Links Modal -->
+  <div id="directLinksModal" class="modal-overlay" onclick="closeDirectLinksModal(event)">
+    <div class="modal-sheet modal-sheet-wide" onclick="event.stopPropagation()">
+      <div class="modal-handle"></div>
+      <div class="modal-head-row">
+        <div class="modal-file-title">📥 Direct Download Links</div>
+        <button class="copy-all-btn" onclick="copyAllDirectLinks()">📋 Copy All</button>
+      </div>
+      <div class="direct-links-intro">Direct links extracted from TeraBox. Click any link to download directly in your browser:</div>
+      <div id="directLinksList" class="direct-links-list"></div>
+      <button class="modal-close-btn" style="margin-top: 16px;" onclick="closeDirectLinksModal()">Close</button>
+    </div>
+  </div>
+
+  <!-- API Server Settings Modal -->
+  <div id="apiConfigModal" class="modal-overlay" onclick="closeApiConfigModal(event)">
+    <div class="modal-sheet" onclick="event.stopPropagation()">
+      <div class="modal-handle"></div>
+      <div class="modal-file-title">⚙️ Backend API Connection</div>
+      <div class="api-modal-desc">Configure the bot server URL for resolving links and triggering downloads:</div>
+      <div class="api-input-wrap">
+        <label class="modal-label">API Base URL</label>
+        <input type="text" id="apiBaseInput" class="api-base-input" placeholder="e.g. http://localhost:8080 or https://xyz.railway.app" />
+      </div>
+      <div class="api-status-row">
+        <span id="apiModalStatus">Status: Unknown</span>
+        <button class="test-api-btn" onclick="testCustomApi()">🔌 Test Connection</button>
+      </div>
+      <div class="modal-action-row" style="margin-top: 16px;">
+        <button class="modal-save-btn" onclick="saveCustomApi()">💾 Save & Connect</button>
+        <button class="modal-close-btn" onclick="closeApiConfigModal()">Cancel</button>
+      </div>
     </div>
   </div>
 

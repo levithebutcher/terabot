@@ -136,11 +136,17 @@ async def process_terabox_link(
             photo_bytes = sum(f.size for f in photo_files)
             other_bytes = sum(f.size for f in other_files)
 
+            from core.webapp_server import register_terabox_session, build_webapp_url
+
+            register_terabox_session(session_id, files, title="TeraBox Share")
+            webapp_url = build_webapp_url(session_id)
+
             buttons = get_folder_action_buttons(
                 session_id=session_id,
                 video_count=len(video_files),
                 photo_count=len(photo_files),
                 other_count=other_count,
+                webapp_url=webapp_url,
             )
 
             msg_text = (
@@ -165,11 +171,14 @@ async def process_terabox_link(
             finally:
                 task_mgr.remove_prompt(session_id)
 
-            if chosen_action == "cancel":
+            if isinstance(chosen_action, tuple) and chosen_action[0] == "multi":
+                handle_list = set(str(h) for h in chosen_action[1])
+                files = [f for f in files if str(f.fs_id) in handle_list or str(f.file_name) in handle_list]
+                filter_mode = "custom"
+            elif chosen_action == "cancel":
                 await status_msg.edit("❌ **Download cancelled by user.**", buttons=None)
                 return
-
-            if chosen_action == "video":
+            elif chosen_action == "video":
                 files = video_files
                 filter_mode = "video"
             elif chosen_action == "photo":

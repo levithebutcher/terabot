@@ -3,6 +3,16 @@ from logging.handlers import RotatingFileHandler
 import sys
 from config import LOG_FILE
 
+# Ensure UTF-8 output on Windows consoles for emojis
+if sys.platform.startswith("win"):
+    try:
+        if hasattr(sys.stdout, "reconfigure"):
+            sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+        if hasattr(sys.stderr, "reconfigure"):
+            sys.stderr.reconfigure(encoding="utf-8", errors="replace")
+    except Exception:
+        pass
+
 # Set up logger with rotating file handler and stdout
 def setup_logger(name: str = "terabot") -> logging.Logger:
     logger = logging.getLogger(name)

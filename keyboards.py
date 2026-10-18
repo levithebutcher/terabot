@@ -54,12 +54,16 @@ def get_folder_action_buttons(
     video_count: int = 0,
     photo_count: int = 0,
     other_count: int = 0,
+    webapp_url: Optional[str] = None,
 ) -> List[List[Button]]:
     """
     Generate interactive selection buttons for folders containing multiple file types.
-    Allows user to filter by Videos, Photos, Others, or Download All.
+    Allows user to filter by Videos, Photos, Others, or Download All, plus optional Mini App.
     """
     buttons = []
+    if webapp_url:
+        buttons.append([get_webapp_button(webapp_url, "📱 Open in Mini App (Full Explorer)")])
+
     row1 = []
     if video_count > 0:
         row1.append(Button.inline("🎬 Videos", data=f"act:video:{session_id}"))
