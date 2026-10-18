@@ -26,6 +26,7 @@ from core.media import (
 )
 from core.database import db
 from core.queue_manager import queue_mgr
+from core.task_manager import task_mgr
 from core.uploader import TelethonUploader
 from utils.helpers import format_bytes, format_duration
 from utils.logger import logger
@@ -48,24 +49,7 @@ def is_mega_folder_url(url: str) -> bool:
     return bool(re.search(r"mega\.(?:nz|co\.nz|io)/(?:folder/|#F!)", url, re.IGNORECASE))
 
 
-def make_stop_btn(user_id: int):
-    """Generate inline stop button for progress messages."""
-    return [[Button.inline("🛑 Abort Task", data=f"stop:{user_id}")]]
-
-
-def get_channel_button(channel_id: Optional[int]):
-    """Return inline button linking directly to the Storage Channel."""
-    if not channel_id:
-        return None
-    raw_str = str(channel_id).strip()
-    if raw_str.startswith("-100"):
-        cid = raw_str[4:]
-    elif raw_str.startswith("-"):
-        cid = raw_str[1:]
-    else:
-        cid = raw_str
-    url = f"https://t.me/c/{cid}/1"
-    return Button.url("🎬 Open Your Storage Channel", url)
+from keyboards import make_stop_btn, get_channel_button, get_channel_buttons_row
 
 
 def render_mega_progress(
@@ -1944,6 +1928,8 @@ async def process_mega_link(
     user_id = event.sender_id
     status_msg = None
     slot_acquired = False
+    if pending_prompts is None:
+        pending_prompts = task_mgr.pending_prompts
 
     if user_id not in config.ADMIN_IDS:
         can_proceed, reason = await queue_mgr.can_process_user(user_id)
@@ -2175,9 +2161,10 @@ async def process_mega_link(
 
 
 # Reference placeholder for active_tasks
-active_tasks_ref: dict = {}
+active_tasks_ref: dict = task_mgr.active_tasks
 
 
 def set_active_tasks_ref(tasks_dict: dict):
     global active_tasks_ref
     active_tasks_ref = tasks_dict
+

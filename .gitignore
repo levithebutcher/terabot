@@ -33,6 +33,10 @@ logs/
 *.sqlite
 *.sqlite3
 
+# IDE / Editor
+.vscode/
+.idea/
+
 # OS Specific
 Thumbs.db
 ehthumbs.db

@@ -157,3 +157,32 @@ def sanitize_filename(name: str) -> str:
     cleaned = re.sub(r'[<>:"/\\|?*\x00-\x1f]', "_", name)
     cleaned = cleaned.strip(". ")
     return cleaned or "unnamed_file"
+
+
+def is_allowed_user(user_id: int) -> bool:
+    """Check if user is authorized to use the bot."""
+    import config
+    if not config.ALLOWED_USERS:
+        return True
+    return user_id in config.ALLOWED_USERS or user_id in config.ADMIN_IDS
+
+
+def update_env_file(key: str, value: str):
+    """Persistently update a key in .env file."""
+    from pathlib import Path
+    from utils.logger import logger
+    try:
+        env_path = Path(".env")
+        if env_path.exists():
+            content = env_path.read_text(encoding="utf-8")
+            pattern = rf"^{key}=.*$"
+            if re.search(pattern, content, flags=re.MULTILINE):
+                new_content = re.sub(pattern, f"{key}={value}", content, flags=re.MULTILINE)
+            else:
+                new_content = content.rstrip() + f"\n{key}={value}\n"
+            env_path.write_text(new_content, encoding="utf-8")
+            logger.info(f"Updated .env: {key}={value}")
+    except Exception as err:
+        from utils.logger import logger
+        logger.warning(f"Could not update .env for {key}: {err}")
+
