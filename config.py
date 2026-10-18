@@ -85,6 +85,7 @@ PROXY_URL: str = os.getenv("PROXY_URL", "").strip().rstrip("/")
 
 # Telegram Mini App (TMA) Configuration
 WEBAPP_URL: str = os.getenv("WEBAPP_URL", "").strip().rstrip("/")
+API_BASE_URL: str = os.getenv("API_BASE_URL", "").strip().rstrip("/")
 WEBAPP_PORT_RAW = os.getenv("PORT", os.getenv("WEBAPP_PORT", "8080")).strip()
 try:
     WEBAPP_PORT: int = int(WEBAPP_PORT_RAW)

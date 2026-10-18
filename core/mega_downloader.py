@@ -931,7 +931,22 @@ class MegaExplorerManager:
 
         # ---------------- TELEGRAM MINI APP BUTTON ----------------
         if getattr(config, "WEBAPP_URL", ""):
-            webapp_url = f"{config.WEBAPP_URL.rstrip('/')}/webapp?session_id={sess.session_id}"
+            base_url = config.WEBAPP_URL.rstrip('/')
+            # If pointing to GitHub Pages or custom static host, don't append /webapp
+            if "github.io" in base_url or base_url.endswith(".html"):
+                sep = "&" if "?" in base_url else "?"
+                webapp_url = f"{base_url}{sep}session_id={sess.session_id}"
+            elif base_url.endswith("/webapp"):
+                webapp_url = f"{base_url}?session_id={sess.session_id}"
+            else:
+                webapp_url = f"{base_url}/webapp?session_id={sess.session_id}"
+
+            # Append api_base if configured and not already present
+            api_base = getattr(config, "API_BASE_URL", "")
+            if api_base and "api_base=" not in webapp_url:
+                sep = "&" if "?" in webapp_url else "?"
+                webapp_url = f"{webapp_url}{sep}api_base={api_base}"
+
             try:
                 from telethon.tl import types
                 webapp_btn = types.KeyboardInlineButton(
