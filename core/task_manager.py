@@ -17,6 +17,7 @@ class TaskManager:
             if not prev.done():
                 prev.cancel()
         self.active_tasks[user_id] = task
+        task.add_done_callback(lambda t: self.remove_task(user_id, t))
 
     def get_task(self, user_id: int) -> Optional[asyncio.Task]:
         """Get the active task for a user."""
@@ -45,7 +46,10 @@ class TaskManager:
 
     def create_prompt(self, session_id: str, user_id: int) -> asyncio.Future:
         """Create and store an asyncio.Future for an interactive user prompt."""
-        loop = asyncio.get_running_loop()
+        try:
+            loop = asyncio.get_running_loop()
+        except RuntimeError:
+            loop = asyncio.get_event_loop()
         future = loop.create_future()
         self.pending_prompts[session_id] = (user_id, future)
         return future

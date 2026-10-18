@@ -8,6 +8,10 @@ from strings import DELIVERY_CHANNEL_ACTIVE, DELIVERY_BOTH_ACTIVE
 from utils.helpers import is_allowed_user
 
 
+def _to_str(val) -> str:
+    return val.decode("utf-8") if isinstance(val, bytes) else str(val)
+
+
 def register_callbacks(client: TelegramClient) -> None:
     """Register all inline button CallbackQuery handlers onto the TelegramClient."""
 
@@ -17,8 +21,7 @@ def register_callbacks(client: TelegramClient) -> None:
         if not is_allowed_user(user_id):
             await event.answer("⛔ Access denied.", alert=True)
             return
-        mode_raw = event.pattern_match.group(1)
-        mode = mode_raw.decode("utf-8") if isinstance(mode_raw, bytes) else str(mode_raw)
+        mode = _to_str(event.pattern_match.group(1))
         await db.set_user_delivery_mode(user_id, mode)
         await event.answer(f"✅ Delivery Mode: {mode.upper()}", alert=False)
 
@@ -31,7 +34,7 @@ def register_callbacks(client: TelegramClient) -> None:
 
     @client.on(events.CallbackQuery(pattern=r"^stop:(\d+)$"))
     async def handle_stop_callback(event: events.CallbackQuery.Event):
-        target_user_id = int(event.pattern_match.group(1).decode("utf-8"))
+        target_user_id = int(_to_str(event.pattern_match.group(1)))
         if event.sender_id != target_user_id:
             await event.answer("⛔ You cannot stop another user's download!", alert=True)
             return
@@ -47,8 +50,8 @@ def register_callbacks(client: TelegramClient) -> None:
 
     @client.on(events.CallbackQuery(pattern=r"^act:(video|photo|other|all|cancel):([a-f0-9]+)$"))
     async def handle_action_callback(event: events.CallbackQuery.Event):
-        action = event.pattern_match.group(1).decode("utf-8")
-        session_id = event.pattern_match.group(2).decode("utf-8")
+        action = _to_str(event.pattern_match.group(1))
+        session_id = _to_str(event.pattern_match.group(2))
 
         prompt_info = task_mgr.get_prompt(session_id)
         if not prompt_info:

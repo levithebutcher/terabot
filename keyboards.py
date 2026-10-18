@@ -83,6 +83,13 @@ def get_cancel_button(session_id: str) -> List[List[Button]]:
     return [[Button.inline("❌ Cancel", data=f"act:cancel:{session_id}")]]
 
 
-def get_webapp_button(url: str, text: str = "📱 Open in Mini App") -> Button:
-    """Generate a WebApp / URL button."""
-    return Button.url(text, url)
+def get_webapp_button(url: str, text: str = "📱 Open in Mini App"):
+    """Generate a native Telegram WebApp sheet button, falling back to Button.url."""
+    try:
+        from telethon.tl import types
+        return types.KeyboardInlineButton(
+            text=text,
+            type=types.InlineButtonTypeWebView(url=url),
+        )
+    except Exception:
+        return Button.url(text, url)

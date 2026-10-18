@@ -1,4 +1,4 @@
-aimport config
+import config
 
 
 def get_welcome_text(first_name: str = "User") -> str:

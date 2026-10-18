@@ -58,27 +58,28 @@ async def main():
         logger.error("API_ID or API_HASH is missing in .env! Exiting.")
         sys.exit(1)
 
-    while True:
-        try:
-            if not client.is_connected():
-                await client.start(bot_token=config.BOT_TOKEN)
-                me = await client.get_me()
-                logger.info(f"Bot successfully logged in as @{me.username} (ID: {me.id})")
-                print(f"\n[+] Bot is running as @{me.username} (ID: {me.id})")
-                print("[+] Listening for incoming messages. Press Ctrl+C to stop.\n")
+    try:
+        while True:
+            try:
+                if not client.is_connected():
+                    await client.start(bot_token=config.BOT_TOKEN)
+                    me = await client.get_me()
+                    logger.info(f"Bot successfully logged in as @{me.username} (ID: {me.id})")
+                    print(f"\n[+] Bot is running as @{me.username} (ID: {me.id})")
+                    print("[+] Listening for incoming messages. Press Ctrl+C to stop.\n")
 
-                if config.PRIVATE_CHAT_ID:
-                    logger.info(f"Syncing storage channel cache for {config.PRIVATE_CHAT_ID}...")
-                    asyncio.create_task(db.sync_channel_cache(client, config.PRIVATE_CHAT_ID))
+                    if config.PRIVATE_CHAT_ID:
+                        logger.info(f"Syncing storage channel cache for {config.PRIVATE_CHAT_ID}...")
+                        asyncio.create_task(db.sync_channel_cache(client, config.PRIVATE_CHAT_ID))
 
-            await client.run_until_disconnected()
-        except asyncio.CancelledError:
-            break
-        except Exception as e:
-            logger.warning(f"Connection interrupted ({e}). Reconnecting in 3 seconds...", exc_info=True)
-            await asyncio.sleep(3)
-        finally:
-            await stop_webapp_server()
+                await client.run_until_disconnected()
+            except asyncio.CancelledError:
+                break
+            except Exception as e:
+                logger.warning(f"Connection interrupted ({e}). Reconnecting in 3 seconds...", exc_info=True)
+                await asyncio.sleep(3)
+    finally:
+        await stop_webapp_server()
 
 
 if __name__ == "__main__":
