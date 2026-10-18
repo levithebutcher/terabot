@@ -205,8 +205,16 @@ async def start_webapp_server():
     app.router.add_get("/api/session/{session_id}", handle_get_session)
     app.router.add_post("/api/session/{session_id}/download", handle_post_download)
 
-    # Static assets (css, js, images)
+    # Static assets (Direct and Prefixed)
     if WEBAPP_DIR.exists():
+        css_file = WEBAPP_DIR / "style.css"
+        js_file = WEBAPP_DIR / "app.js"
+        if css_file.exists():
+            app.router.add_get("/style.css", lambda req: web.FileResponse(css_file, headers=make_cors_headers()))
+            app.router.add_get("/webapp/style.css", lambda req: web.FileResponse(css_file, headers=make_cors_headers()))
+        if js_file.exists():
+            app.router.add_get("/app.js", lambda req: web.FileResponse(js_file, headers=make_cors_headers()))
+            app.router.add_get("/webapp/app.js", lambda req: web.FileResponse(js_file, headers=make_cors_headers()))
         app.router.add_static("/static/", path=WEBAPP_DIR, name="static")
 
     _server_runner = web.AppRunner(app)

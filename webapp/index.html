@@ -2,1006 +2,151 @@
 <html lang="en">
 <head>
   <meta charset="UTF-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, viewport-fit=cover">
   <title>TeraBot Cloud Explorer</title>
+  
   <!-- Telegram WebApp SDK -->
   <script src="https://telegram.org/js/telegram-web-app.js"></script>
-  <!-- Google Fonts: Inter -->
+  
+  <!-- Google Fonts: Outfit, Plus Jakarta Sans, JetBrains Mono -->
   <link rel="preconnect" href="https://fonts.googleapis.com">
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-  <link href="https://fonts.googleapis.com/css2?family=Plus+Jakarta+Sans:wght@400;500;600;700;800&display=swap" rel="stylesheet">
+  <link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@500;600&family=Outfit:wght@400;500;600;700;800&family=Plus+Jakarta+Sans:wght@400;500;600;700&display=swap" rel="stylesheet">
   
-  <style>
-    :root {
-      --bg: var(--tg-theme-bg-color, #0b0f19);
-      --secondary-bg: var(--tg-theme-secondary-bg-color, #131c2e);
-      --card-bg: rgba(26, 38, 62, 0.65);
-      --card-hover: rgba(38, 55, 90, 0.85);
-      --text: var(--tg-theme-text-color, #f1f5f9);
-      --text-muted: var(--tg-theme-hint-color, #94a3b8);
-      --accent: var(--tg-theme-button-color, #38bdf8);
-      --accent-text: var(--tg-theme-button-text-color, #030712);
-      --accent-glow: rgba(56, 189, 248, 0.25);
-      --border: rgba(255, 255, 255, 0.08);
-      --success: #10b981;
-      --folder-color: #f59e0b;
-      --video-color: #ec4899;
-      --photo-color: #8b5cf6;
-      --file-color: #3b82f6;
-      --radius: 14px;
-    }
-
-    * {
-      box-sizing: border-box;
-      margin: 0;
-      padding: 0;
-      -webkit-tap-highlight-color: transparent;
-      user-select: none;
-    }
-
-    body {
-      font-family: 'Plus Jakarta Sans', -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
-      background-color: var(--bg);
-      color: var(--text);
-      min-height: 100vh;
-      display: flex;
-      flex-direction: column;
-      overflow-x: hidden;
-      padding-bottom: 90px;
-    }
-
-    /* Header */
-    header {
-      position: sticky;
-      top: 0;
-      z-index: 50;
-      background: rgba(11, 15, 25, 0.88);
-      backdrop-filter: blur(16px);
-      -webkit-backdrop-filter: blur(16px);
-      border-bottom: 1px solid var(--border);
-      padding: 12px 16px;
-    }
-
-    .top-bar {
-      display: flex;
-      align-items: center;
-      justify-content: space-between;
-      gap: 12px;
-      margin-bottom: 10px;
-    }
-
-    .brand {
-      display: flex;
-      align-items: center;
-      gap: 8px;
-      font-weight: 800;
-      font-size: 1.1rem;
-      letter-spacing: -0.02em;
-      color: var(--text);
-    }
-
-    .brand-badge {
-      background: linear-gradient(135deg, #38bdf8, #818cf8);
-      color: #030712;
-      font-size: 0.65rem;
-      font-weight: 800;
-      padding: 2px 7px;
-      border-radius: 20px;
-      text-transform: uppercase;
-      letter-spacing: 0.05em;
-    }
-
-    .badge-counter {
-      font-size: 0.75rem;
-      color: var(--text-muted);
-      background: var(--secondary-bg);
-      border: 1px solid var(--border);
-      padding: 4px 10px;
-      border-radius: 20px;
-      font-weight: 600;
-    }
-
-    /* Breadcrumbs */
-    .breadcrumb-wrap {
-      display: flex;
-      align-items: center;
-      gap: 6px;
-      overflow-x: auto;
-      white-space: nowrap;
-      padding-bottom: 4px;
-      scrollbar-width: none;
-    }
-    .breadcrumb-wrap::-webkit-scrollbar {
-      display: none;
-    }
-
-    .crumb-pill {
-      font-size: 0.8rem;
-      font-weight: 600;
-      padding: 4px 10px;
-      border-radius: 8px;
-      background: var(--secondary-bg);
-      color: var(--text-muted);
-      border: 1px solid var(--border);
-      cursor: pointer;
-      display: flex;
-      align-items: center;
-      gap: 4px;
-      transition: all 0.15s ease;
-    }
-    .crumb-pill:active {
-      transform: scale(0.96);
-    }
-    .crumb-pill.active {
-      background: rgba(56, 189, 248, 0.15);
-      color: var(--accent);
-      border-color: rgba(56, 189, 248, 0.35);
-    }
-    .crumb-sep {
-      color: var(--text-muted);
-      font-size: 0.75rem;
-      opacity: 0.5;
-    }
-
-    /* Controls Bar: Search & Sort */
-    .controls {
-      display: flex;
-      gap: 8px;
-      margin-top: 8px;
-    }
-
-    .search-box {
-      flex: 1;
-      position: relative;
-    }
-
-    .search-box input {
-      width: 100%;
-      background: var(--secondary-bg);
-      border: 1px solid var(--border);
-      border-radius: 10px;
-      padding: 9px 12px 9px 34px;
-      font-size: 0.85rem;
-      color: var(--text);
-      outline: none;
-      transition: border-color 0.2s;
-      font-family: inherit;
-    }
-    .search-box input:focus {
-      border-color: var(--accent);
-    }
-    .search-box svg {
-      position: absolute;
-      left: 10px;
-      top: 50%;
-      transform: translateY(-50%);
-      width: 16px;
-      height: 16px;
-      color: var(--text-muted);
-    }
-
-    .sort-select {
-      background: var(--secondary-bg);
-      border: 1px solid var(--border);
-      border-radius: 10px;
-      padding: 0 12px;
-      font-size: 0.8rem;
-      color: var(--text);
-      outline: none;
-      cursor: pointer;
-      font-family: inherit;
-      font-weight: 600;
-    }
-
-    /* Filter Chips */
-    .chips {
-      display: flex;
-      gap: 6px;
-      margin-top: 8px;
-      overflow-x: auto;
-      scrollbar-width: none;
-    }
-    .chips::-webkit-scrollbar {
-      display: none;
-    }
-
-    .chip {
-      font-size: 0.75rem;
-      font-weight: 600;
-      padding: 5px 12px;
-      border-radius: 18px;
-      background: var(--secondary-bg);
-      border: 1px solid var(--border);
-      color: var(--text-muted);
-      cursor: pointer;
-      white-space: nowrap;
-      transition: all 0.15s ease;
-    }
-    .chip.active {
-      background: var(--accent);
-      color: var(--accent-text);
-      border-color: var(--accent);
-    }
-
-    /* List Container */
-    main {
-      flex: 1;
-      padding: 12px 16px;
-    }
-
-    .section-title {
-      font-size: 0.75rem;
-      font-weight: 700;
-      text-transform: uppercase;
-      letter-spacing: 0.05em;
-      color: var(--text-muted);
-      margin: 14px 0 8px 4px;
-      display: flex;
-      justify-content: space-between;
-      align-items: center;
-    }
-
-    .select-all-btn {
-      color: var(--accent);
-      background: none;
-      border: none;
-      font-size: 0.75rem;
-      font-weight: 700;
-      cursor: pointer;
-      padding: 2px 6px;
-    }
-
-    .item-grid {
-      display: flex;
-      flex-direction: column;
-      gap: 8px;
-    }
-
-    /* Item Card (Folders & Files) */
-    .card {
-      background: var(--card-bg);
-      border: 1px solid var(--border);
-      border-radius: var(--radius);
-      padding: 12px;
-      display: flex;
-      align-items: center;
-      gap: 12px;
-      cursor: pointer;
-      transition: all 0.2s cubic-bezier(0.16, 1, 0.3, 1);
-      position: relative;
-    }
-    .card:active {
-      transform: scale(0.985);
-      background: var(--card-hover);
-    }
-
-    .card.selected {
-      background: rgba(56, 189, 248, 0.12);
-      border-color: rgba(56, 189, 248, 0.5);
-      box-shadow: 0 4px 16px var(--accent-glow);
-    }
-
-    .icon-box {
-      width: 42px;
-      height: 42px;
-      border-radius: 11px;
-      display: flex;
-      align-items: center;
-      justify-content: center;
-      font-size: 1.35rem;
-      flex-shrink: 0;
-    }
-
-    .icon-folder {
-      background: rgba(245, 158, 11, 0.15);
-      color: var(--folder-color);
-    }
-    .icon-video {
-      background: rgba(236, 72, 153, 0.15);
-      color: var(--video-color);
-    }
-    .icon-photo {
-      background: rgba(139, 92, 246, 0.15);
-      color: var(--photo-color);
-    }
-    .icon-file {
-      background: rgba(59, 130, 246, 0.15);
-      color: var(--file-color);
-    }
-
-    .card-info {
-      flex: 1;
-      min-width: 0;
-    }
-
-    .card-title {
-      font-size: 0.9rem;
-      font-weight: 600;
-      color: var(--text);
-      white-space: nowrap;
-      overflow: hidden;
-      text-overflow: ellipsis;
-      margin-bottom: 3px;
-    }
-
-    .card-meta {
-      font-size: 0.75rem;
-      color: var(--text-muted);
-      display: flex;
-      gap: 8px;
-      align-items: center;
-    }
-
-    .meta-badge {
-      background: rgba(255, 255, 255, 0.05);
-      padding: 1px 6px;
-      border-radius: 5px;
-      font-weight: 600;
-      font-size: 0.7rem;
-    }
-
-    /* Checkbox */
-    .checkbox {
-      width: 22px;
-      height: 22px;
-      border-radius: 6px;
-      border: 2px solid rgba(255, 255, 255, 0.25);
-      display: flex;
-      align-items: center;
-      justify-content: center;
-      flex-shrink: 0;
-      transition: all 0.15s ease;
-    }
-
-    .card.selected .checkbox {
-      background: var(--accent);
-      border-color: var(--accent);
-    }
-
-    .checkbox svg {
-      width: 14px;
-      height: 14px;
-      stroke: var(--accent-text);
-      stroke-width: 3;
-      stroke-linecap: round;
-      stroke-linejoin: round;
-      fill: none;
-      display: none;
-    }
-    .card.selected .checkbox svg {
-      display: block;
-    }
-
-    /* Folder Arrow */
-    .folder-arrow {
-      color: var(--text-muted);
-      flex-shrink: 0;
-      opacity: 0.6;
-    }
-
-    /* Floating Fallback Action Bar */
-    .bottom-bar {
-      position: fixed;
-      bottom: 0;
-      left: 0;
-      right: 0;
-      background: rgba(11, 15, 25, 0.94);
-      backdrop-filter: blur(20px);
-      border-top: 1px solid var(--border);
-      padding: 12px 16px;
-      display: flex;
-      align-items: center;
-      justify-content: space-between;
-      gap: 12px;
-      z-index: 100;
-      transform: translateY(100%);
-      transition: transform 0.3s cubic-bezier(0.16, 1, 0.3, 1);
-    }
-    .bottom-bar.show {
-      transform: translateY(0);
-    }
-
-    .bar-summary {
-      display: flex;
-      flex-direction: column;
-    }
-    .bar-count {
-      font-size: 0.9rem;
-      font-weight: 700;
-      color: var(--text);
-    }
-    .bar-size {
-      font-size: 0.75rem;
-      color: var(--text-muted);
-    }
-
-    .action-btn {
-      background: var(--accent);
-      color: var(--accent-text);
-      border: none;
-      border-radius: 12px;
-      padding: 12px 20px;
-      font-size: 0.9rem;
-      font-weight: 800;
-      cursor: pointer;
-      display: flex;
-      align-items: center;
-      gap: 8px;
-      box-shadow: 0 4px 20px var(--accent-glow);
-      transition: transform 0.15s ease;
-      font-family: inherit;
-    }
-    .action-btn:active {
-      transform: scale(0.96);
-    }
-
-    /* Loading Spinner & Empty State */
-    .state-box {
-      display: flex;
-      flex-direction: column;
-      align-items: center;
-      justify-content: center;
-      min-height: 40vh;
-      text-align: center;
-      color: var(--text-muted);
-      padding: 24px;
-    }
-    .state-icon {
-      font-size: 2.5rem;
-      margin-bottom: 12px;
-    }
-    .state-title {
-      font-size: 1.1rem;
-      font-weight: 700;
-      color: var(--text);
-      margin-bottom: 6px;
-    }
-    .spinner {
-      width: 36px;
-      height: 36px;
-      border: 3px solid rgba(255, 255, 255, 0.1);
-      border-radius: 50%;
-      border-top-color: var(--accent);
-      animation: spin 0.8s linear infinite;
-      margin-bottom: 14px;
-    }
-    @keyframes spin {
-      to { transform: rotate(360deg); }
-    }
-  </style>
+  <!-- Modular Stylesheet -->
+  <link rel="stylesheet" href="style.css">
 </head>
 <body>
 
-  <!-- Header -->
+  <!-- Ambient top glow -->
+  <div class="ambient-glow"></div>
+
+  <!-- Modern App Header -->
   <header>
-    <div class="top-bar">
+    <div class="top-row">
       <div class="brand">
-        <span>⚡ TeraBot Explorer</span>
-        <span class="brand-badge">Mini App</span>
+        <div class="brand-icon">⚡</div>
+        <div class="brand-text">
+          <div class="brand-title">TeraBot Explorer</div>
+          <div class="brand-subtitle">
+            <span class="status-dot"></span>
+            <span id="networkStatus">Telegram Cloud</span>
+          </div>
+        </div>
       </div>
-      <div id="statCounter" class="badge-counter">0 Files</div>
-    </div>
-
-    <!-- Clickable Breadcrumb Hierarchy -->
-    <div id="breadcrumbs" class="breadcrumb-wrap">
-      <div class="crumb-pill active" onclick="navigateBreadcrumb('root')">🏠 Root</div>
-    </div>
-
-    <!-- Search & Sort Controls -->
-    <div class="controls">
-      <div class="search-box">
-        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="11" cy="11" r="8"/><line x1="21" y1="21" x2="16.65" y2="16.65"/></svg>
-        <input type="text" id="searchInput" placeholder="Search files & folders..." oninput="handleSearch(this.value)">
+      <div class="top-actions">
+        <div id="statCounter" class="stats-pill">
+          <span>0 Files</span>
+        </div>
       </div>
-      <select id="sortSelect" class="sort-select" onchange="handleSort(this.value)">
-        <option value="size_desc">Size ⬇️</option>
-        <option value="size_asc">Size ⬆️</option>
-        <option value="name_asc">Name A-Z</option>
-      </select>
     </div>
 
-    <!-- Type Filters -->
-    <div class="chips">
-      <div class="chip active" onclick="setFilter('all', this)">All</div>
-      <div class="chip" onclick="setFilter('video', this)">🎬 Videos</div>
-      <div class="chip" onclick="setFilter('photo', this)">🖼️ Photos</div>
-      <div class="chip" onclick="setFilter('other', this)">📄 Docs</div>
+    <!-- Interactive Breadcrumbs -->
+    <div id="breadcrumbs" class="breadcrumbs-bar">
+      <div class="crumb-pill active" onclick="navigateBreadcrumb('root')">
+        <span>🏠 Root</span>
+      </div>
+    </div>
+
+    <!-- Search & Filter Controls -->
+    <div class="toolbar">
+      <div class="search-row">
+        <div class="search-container">
+          <svg class="search-icon-left" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round">
+            <circle cx="11" cy="11" r="8"></circle>
+            <line x1="21" y1="21" x2="16.65" y2="16.65"></line>
+          </svg>
+          <input type="text" id="searchInput" class="search-input" placeholder="Search in this folder..." oninput="handleSearch(this.value)">
+          <button id="searchClearBtn" class="search-clear-btn" onclick="clearSearch()">✕</button>
+        </div>
+        <select id="sortSelect" class="sort-dropdown" onchange="handleSort(this.value)">
+          <option value="size_desc">Size ⬇️</option>
+          <option value="size_asc">Size ⬆️</option>
+          <option value="name_asc">Name A-Z</option>
+          <option value="name_desc">Name Z-A</option>
+        </select>
+      </div>
+
+      <!-- Type Filter Chips with Live Counters -->
+      <div class="filter-chips">
+        <button class="chip-btn active" onclick="setFilter('all', this)">
+          <span>All</span>
+          <span id="chipCountAll" class="chip-count">0</span>
+        </button>
+        <button class="chip-btn" onclick="setFilter('video', this)">
+          <span>🎬 Videos</span>
+          <span id="chipCountVideo" class="chip-count">0</span>
+        </button>
+        <button class="chip-btn" onclick="setFilter('photo', this)">
+          <span>🖼️ Photos</span>
+          <span id="chipCountPhoto" class="chip-count">0</span>
+        </button>
+        <button class="chip-btn" onclick="setFilter('other', this)">
+          <span>📄 Docs & Other</span>
+          <span id="chipCountOther" class="chip-count">0</span>
+        </button>
+      </div>
     </div>
   </header>
 
-  <!-- Main Explorer Content -->
+  <!-- Main Explorer View -->
   <main id="mainContent">
-    <div class="state-box">
-      <div class="spinner"></div>
-      <div class="state-title">Loading Cloud Folder...</div>
-      <p>Fetching file tree and media metadata</p>
+    <div class="skeleton-wrap">
+      <div class="skeleton-card"></div>
+      <div class="skeleton-card"></div>
+      <div class="skeleton-card"></div>
+      <div class="skeleton-card"></div>
     </div>
   </main>
 
-  <!-- Floating Sticky Action Bar (For Telegram fallback / Desktop preview) -->
-  <div id="bottomBar" class="bottom-bar">
-    <div class="bar-summary">
-      <div id="barCount" class="bar-count">0 Files Selected</div>
+  <!-- Floating Sticky Action Bar (Desktop / Fallback) -->
+  <div id="bottomBar" class="floating-bar">
+    <div class="bar-info">
+      <div id="barCount" class="bar-count">0 Selected</div>
       <div id="barSize" class="bar-size">0 MB Total</div>
     </div>
-    <button id="downloadBtn" class="action-btn" onclick="submitDownload()">
-      <span>🚀 Download</span>
-    </button>
+    <div class="bar-buttons">
+      <button class="clear-selection-btn" onclick="clearAllSelections()">✕ Clear</button>
+      <button id="downloadBtn" class="download-cta-btn" onclick="submitDownload()">
+        <span>🚀 Download</span>
+      </button>
+    </div>
   </div>
 
-  <script>
-    // Initialize Telegram WebApp SDK
-    const tg = window.Telegram?.WebApp;
-    if (tg) {
-      tg.ready();
-      tg.expand();
-      if (tg.enableClosingConfirmation) tg.enableClosingConfirmation();
-      if (tg.BackButton) {
-        tg.BackButton.onClick(() => handleBackNavigation());
-      }
-    }
+  <!-- Toast Notification -->
+  <div id="toastPill" class="toast-pill">
+    <span id="toastIcon">✨</span>
+    <span id="toastMsg">Notification</span>
+  </div>
 
-    // State
-    let sessionData = null;
-    let currentDirH = null;
-    let pathStack = []; // [{h, name}]
-    let selectedHandles = new Set();
-    let searchQuery = "";
-    let sortMode = "size_desc";
-    let filterType = "all";
+  <!-- File Detail Sheet Modal -->
+  <div id="detailModal" class="modal-overlay" onclick="closeDetailModal(event)">
+    <div class="modal-sheet" onclick="event.stopPropagation()">
+      <div class="modal-handle"></div>
+      <div id="modalFileName" class="modal-file-title">File Details</div>
+      <div class="modal-grid">
+        <div class="modal-field">
+          <div class="modal-label">File Size</div>
+          <div id="modalFileSize" class="modal-val">0 MB</div>
+        </div>
+        <div class="modal-field">
+          <div class="modal-label">File Type</div>
+          <div id="modalFileType" class="modal-val">Video</div>
+        </div>
+        <div class="modal-field">
+          <div class="modal-label">Extension</div>
+          <div id="modalFileExt" class="modal-val">.mp4</div>
+        </div>
+        <div class="modal-field">
+          <div class="modal-label">Handle ID</div>
+          <div id="modalFileHandle" class="modal-val">--</div>
+        </div>
+      </div>
+      <button class="modal-close-btn" onclick="closeDetailModal()">Done</button>
+    </div>
+  </div>
 
-    // Format Bytes
-    function formatBytes(bytes) {
-      if (!bytes || bytes === 0) return "0 B";
-      const k = 1024;
-      const sizes = ["B", "KB", "MB", "GB", "TB"];
-      const i = Math.floor(Math.log(bytes) / Math.log(k));
-      return (bytes / Math.pow(k, i)).toFixed(i >= 3 ? 2 : 1) + " " + sizes[i];
-    }
-
-    // Haptic Feedback helper
-    function haptic(type = "selectionChanged") {
-      try {
-        if (tg?.HapticFeedback) {
-          if (type === "selectionChanged") tg.HapticFeedback.selectionChanged();
-          else if (type === "impact") tg.HapticFeedback.impactOccurred("medium");
-          else if (type === "heavy") tg.HapticFeedback.impactOccurred("heavy");
-          else if (type === "success") tg.HapticFeedback.notificationOccurred("success");
-        }
-      } catch (e) {}
-    }
-
-    // Load Data: From API or Rich Mock Demo
-    async function loadData() {
-      const urlParams = new URLSearchParams(window.location.search);
-      const sessionId = urlParams.get("session_id") || window.location.hash.replace("#", "");
-
-      if (sessionId && sessionId !== "demo") {
-        try {
-          const res = await fetch(`/api/session/${sessionId}`);
-          const json = await res.json();
-          if (json.ok) {
-            sessionData = json;
-            initExplorer();
-            return;
-          }
-        } catch (e) {
-          console.warn("API request failed, loading demo view:", e);
-        }
-      }
-
-      // Demo Mock Data for Browser Testing
-      sessionData = {
-        ok: true,
-        session_id: "demo",
-        root_h: "dir_root",
-        title: "Stranger Things Season 4 [Complete 4K HDR]",
-        total_files: 14,
-        total_size: 48318382080,
-        dirs: {
-          "dir_root": {
-            h: "dir_root",
-            name: "Stranger Things Season 4",
-            path: "/Stranger Things Season 4",
-            parent: null,
-            active_children: ["dir_4k", "dir_1080p", "dir_subs"],
-            total_files: 14,
-            total_size: 48318382080,
-            files: [
-              { h: "f_trailer", name: "Official_Trailer_4K.mp4", size: 314572800, formatted_size: "300 MB", type: "video", ext: ".mp4" },
-              { h: "f_poster", name: "KeyArt_Poster_UltraHD.png", size: 15728640, formatted_size: "15 MB", type: "photo", ext: ".png" },
-              { h: "f_nfo", name: "Release_Notes.nfo", size: 4096, formatted_size: "4 KB", type: "other", ext: ".nfo" }
-            ]
-          },
-          "dir_4k": {
-            h: "dir_4k",
-            name: "4K HDR Dolby Vision",
-            path: "/Stranger Things Season 4/4K HDR Dolby Vision",
-            parent: "dir_root",
-            active_children: [],
-            total_files: 4,
-            total_size: 33554432000,
-            files: [
-              { h: "f_4k_e1", name: "Stranger.Things.S04E01.Chapter.One.2160p.mkv", size: 8589934592, formatted_size: "8.00 GB", type: "video", ext: ".mkv" },
-              { h: "f_4k_e2", name: "Stranger.Things.S04E02.Vecnas.Curse.2160p.mkv", size: 8388608000, formatted_size: "7.81 GB", type: "video", ext: ".mkv" },
-              { h: "f_4k_e3", name: "Stranger.Things.S04E03.The.Monster.2160p.mkv", size: 8257077248, formatted_size: "7.69 GB", type: "video", ext: ".mkv" },
-              { h: "f_4k_e4", name: "Stranger.Things.S04E04.Dear.Billy.2160p.mkv", size: 8318812160, formatted_size: "7.75 GB", type: "video", ext: ".mkv" }
-            ]
-          },
-          "dir_1080p": {
-            h: "dir_1080p",
-            name: "1080p WEB-DL x265",
-            path: "/Stranger Things Season 4/1080p WEB-DL x265",
-            parent: "dir_root",
-            active_children: [],
-            total_files: 4,
-            total_size: 14763950080,
-            files: [
-              { h: "f_1080_e1", name: "Stranger.Things.S04E01.1080p.mkv", size: 3690987520, formatted_size: "3.44 GB", type: "video", ext: ".mkv" },
-              { h: "f_1080_e2", name: "Stranger.Things.S04E02.1080p.mkv", size: 3623878656, formatted_size: "3.38 GB", type: "video", ext: ".mkv" },
-              { h: "f_1080_e3", name: "Stranger.Things.S04E03.1080p.mkv", size: 3724541952, formatted_size: "3.47 GB", type: "video", ext: ".mkv" },
-              { h: "f_1080_e4", name: "Stranger.Things.S04E04.1080p.mkv", size: 3724541952, formatted_size: "3.47 GB", type: "video", ext: ".mkv" }
-            ]
-          },
-          "dir_subs": {
-            h: "dir_subs",
-            name: "Subtitles Multilingual",
-            path: "/Stranger Things Season 4/Subtitles Multilingual",
-            parent: "dir_root",
-            active_children: [],
-            total_files: 3,
-            total_size: 3145728,
-            files: [
-              { h: "f_sub_en", name: "English_Complete_SDH.srt", size: 1048576, formatted_size: "1.0 MB", type: "other", ext: ".srt" },
-              { h: "f_sub_hi", name: "Hindi_Dubbed_Sync.srt", size: 1048576, formatted_size: "1.0 MB", type: "other", ext: ".srt" },
-              { h: "f_sub_es", name: "Spanish_LatAm.srt", size: 1048576, formatted_size: "1.0 MB", type: "other", ext: ".srt" }
-            ]
-          }
-        }
-      };
-      initExplorer();
-    }
-
-    function initExplorer() {
-      currentDirH = sessionData.root_h;
-      pathStack = [{ h: sessionData.root_h, name: sessionData.title || "Root" }];
-      document.getElementById("statCounter").innerText = `${sessionData.total_files} Files`;
-      renderExplorer();
-    }
-
-    // Render Current Directory
-    function renderExplorer() {
-      updateBreadcrumbs();
-      updateBackButton();
-
-      const main = document.getElementById("mainContent");
-      const currentDir = sessionData.dirs[currentDirH];
-
-      if (!currentDir) {
-        main.innerHTML = `
-          <div class="state-box">
-            <div class="state-icon">⚠️</div>
-            <div class="state-title">Folder Not Found</div>
-            <p>Could not locate the requested folder.</p>
-          </div>
-        `;
-        return;
-      }
-
-      // Collect Subfolders
-      let childDirs = (currentDir.active_children || [])
-        .map(h => sessionData.dirs[h])
-        .filter(Boolean);
-
-      // Collect Direct Files
-      let directFiles = currentDir.files || [];
-
-      // Filter by Type
-      if (filterType !== "all") {
-        directFiles = directFiles.filter(f => f.type === filterType);
-      }
-
-      // Filter by Search Query
-      if (searchQuery.trim()) {
-        const q = searchQuery.toLowerCase();
-        childDirs = childDirs.filter(d => d.name.toLowerCase().includes(q));
-        directFiles = directFiles.filter(f => f.name.toLowerCase().includes(q));
-      }
-
-      // Sorting
-      if (sortMode === "size_desc") {
-        childDirs.sort((a, b) => b.total_size - a.total_size);
-        directFiles.sort((a, b) => b.size - a.size);
-      } else if (sortMode === "size_asc") {
-        childDirs.sort((a, b) => a.total_size - b.total_size);
-        directFiles.sort((a, b) => a.size - b.size);
-      } else {
-        childDirs.sort((a, b) => a.name.localeCompare(b.name));
-        directFiles.sort((a, b) => a.name.localeCompare(b.name));
-      }
-
-      let html = "";
-
-      // Render Subfolders
-      if (childDirs.length > 0) {
-        html += `<div class="section-title">📂 Subfolders (${childDirs.length})</div><div class="item-grid">`;
-        childDirs.forEach(d => {
-          html += `
-            <div class="card" onclick="openFolder('${d.h}', '${escapeHtml(d.name)}')">
-              <div class="icon-box icon-folder">📁</div>
-              <div class="card-info">
-                <div class="card-title">${escapeHtml(d.name)}</div>
-                <div class="card-meta">
-                  <span class="meta-badge">${d.total_files} files</span>
-                  <span>${formatBytes(d.total_size)}</span>
-                </div>
-              </div>
-              <div class="folder-arrow">
-                <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><polyline points="9 18 15 12 9 6"/></svg>
-              </div>
-            </div>
-          `;
-        });
-        html += `</div>`;
-      }
-
-      // Render Files
-      if (directFiles.length > 0) {
-        const allSelected = directFiles.every(f => selectedHandles.has(f.h));
-        html += `
-          <div class="section-title">
-            <span>📄 Files (${directFiles.length})</span>
-            <button class="select-all-btn" onclick="toggleSelectAllCurrent(${allSelected})">
-              ${allSelected ? "Deselect All" : "Select All"}
-            </button>
-          </div>
-          <div class="item-grid">
-        `;
-
-        directFiles.forEach(f => {
-          const isSelected = selectedHandles.has(f.h);
-          const iconClass = f.type === "video" ? "icon-video" : (f.type === "photo" ? "icon-photo" : "icon-file");
-          const iconSymbol = f.type === "video" ? "🎬" : (f.type === "photo" ? "🖼️" : "📄");
-
-          html += `
-            <div class="card ${isSelected ? 'selected' : ''}" onclick="toggleFileSelection('${f.h}')">
-              <div class="icon-box ${iconClass}">${iconSymbol}</div>
-              <div class="card-info">
-                <div class="card-title">${escapeHtml(f.name)}</div>
-                <div class="card-meta">
-                  <span class="meta-badge">${f.ext || 'FILE'}</span>
-                  <span>${formatBytes(f.size)}</span>
-                </div>
-              </div>
-              <div class="checkbox">
-                <svg viewBox="0 0 24 24"><polyline points="20 6 9 17 4 12"/></svg>
-              </div>
-            </div>
-          `;
-        });
-        html += `</div>`;
-      }
-
-      // Empty State
-      if (childDirs.length === 0 && directFiles.length === 0) {
-        html = `
-          <div class="state-box">
-            <div class="state-icon">🔍</div>
-            <div class="state-title">No Items Found</div>
-            <p>Try clearing filters or search query.</p>
-          </div>
-        `;
-      }
-
-      main.innerHTML = html;
-      updateActionBar();
-    }
-
-    // Folder Drill-down
-    function openFolder(h, name) {
-      haptic("impact");
-      currentDirH = h;
-      pathStack.push({ h, name });
-      renderExplorer();
-      window.scrollTo({ top: 0, behavior: 'smooth' });
-    }
-
-    // Back Navigation
-    function handleBackNavigation() {
-      if (pathStack.length > 1) {
-        haptic("impact");
-        pathStack.pop();
-        currentDirH = pathStack[pathStack.length - 1].h;
-        renderExplorer();
-      }
-    }
-
-    function navigateBreadcrumb(index) {
-      if (index === "root") {
-        pathStack = [pathStack[0]];
-        currentDirH = pathStack[0].h;
-      } else {
-        pathStack = pathStack.slice(0, index + 1);
-        currentDirH = pathStack[pathStack.length - 1].h;
-      }
-      haptic("impact");
-      renderExplorer();
-    }
-
-    function updateBreadcrumbs() {
-      const wrap = document.getElementById("breadcrumbs");
-      let html = "";
-      pathStack.forEach((crumb, idx) => {
-        const isLast = idx === pathStack.length - 1;
-        html += `
-          <div class="crumb-pill ${isLast ? 'active' : ''}" onclick="navigateBreadcrumb(${idx})">
-            ${idx === 0 ? '🏠 ' : '📁 '}${escapeHtml(crumb.name)}
-          </div>
-        `;
-        if (!isLast) {
-          html += `<span class="crumb-sep">/</span>`;
-        }
-      });
-      wrap.innerHTML = html;
-    }
-
-    function updateBackButton() {
-      if (tg?.BackButton) {
-        if (pathStack.length > 1) {
-          tg.BackButton.show();
-        } else {
-          tg.BackButton.hide();
-        }
-      }
-    }
-
-    // File Selection
-    function toggleFileSelection(h) {
-      haptic("selectionChanged");
-      if (selectedHandles.has(h)) {
-        selectedHandles.delete(h);
-      } else {
-        selectedHandles.add(h);
-      }
-      renderExplorer();
-    }
-
-    function toggleSelectAllCurrent(currentlyAllSelected) {
-      haptic("impact");
-      const currentDir = sessionData.dirs[currentDirH];
-      if (!currentDir || !currentDir.files) return;
-
-      currentDir.files.forEach(f => {
-        if (currentlyAllSelected) {
-          selectedHandles.delete(f.h);
-        } else {
-          selectedHandles.add(f.h);
-        }
-      });
-      renderExplorer();
-    }
-
-    // Action Bar & Telegram MainButton Sync
-    function updateActionBar() {
-      const count = selectedHandles.size;
-      let totalBytes = 0;
-
-      // Calculate total bytes of selected handles
-      Object.values(sessionData.dirs).forEach(d => {
-        (d.files || []).forEach(f => {
-          if (selectedHandles.has(f.h)) {
-            totalBytes += f.size;
-          }
-        });
-      });
-
-      const countText = `${count} File${count === 1 ? '' : 's'} Selected`;
-      const sizeText = formatBytes(totalBytes);
-      const btnText = `🚀 Download (${count} • ${sizeText})`;
-
-      // 1. Telegram Native MainButton
-      if (tg?.MainButton) {
-        if (count > 0) {
-          tg.MainButton.setText(btnText);
-          tg.MainButton.show();
-          tg.MainButton.enable();
-          tg.MainButton.onClick(submitDownload);
-        } else {
-          tg.MainButton.hide();
-        }
-      }
-
-      // 2. On-Screen Floating Bar (Fallback for browser / testing)
-      const bar = document.getElementById("bottomBar");
-      if (count > 0) {
-        document.getElementById("barCount").innerText = countText;
-        document.getElementById("barSize").innerText = `${sizeText} Total`;
-        document.getElementById("downloadBtn").innerHTML = `<span>🚀 Download (${count})</span>`;
-        bar.classList.add("show");
-      } else {
-        bar.classList.remove("show");
-      }
-    }
-
-    // Search & Filter Handlers
-    function handleSearch(val) {
-      searchQuery = val;
-      renderExplorer();
-    }
-
-    function handleSort(val) {
-      sortMode = val;
-      haptic("impact");
-      renderExplorer();
-    }
-
-    function setFilter(type, el) {
-      filterType = type;
-      haptic("impact");
-      document.querySelectorAll(".chip").forEach(c => c.classList.remove("active"));
-      el.classList.add("active");
-      renderExplorer();
-    }
-
-    // Submit Selection to Bot
-    async function submitDownload() {
-      if (selectedHandles.size === 0) return;
-      haptic("heavy");
-
-      const handles = Array.from(selectedHandles);
-
-      if (tg?.MainButton) {
-        tg.MainButton.showProgress();
-      }
-
-      // If demo mode, show alert
-      if (sessionData.session_id === "demo") {
-        if (tg?.showAlert) {
-          tg.showAlert(`✅ Demo Success: Selected ${handles.length} files. In Telegram, bot will now stream & upload these files!`);
-        } else {
-          alert(`✅ Demo Success: Selected ${handles.length} files. In Telegram, bot will now stream & upload these files!`);
-        }
-        if (tg?.MainButton) tg.MainButton.hideProgress();
-        return;
-      }
-
-      try {
-        const res = await fetch(`/api/session/${sessionData.session_id}/download`, {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({
-            selected_handles: handles,
-            init_data: tg?.initData || ""
-          })
-        });
-
-        const json = await res.json();
-        if (json.ok) {
-          haptic("success");
-          if (tg?.showAlert) {
-            tg.showAlert(`🚀 Starting download for ${handles.length} selected files in your chat!`, () => {
-              tg.close();
-            });
-          } else {
-            alert(`🚀 Starting download for ${handles.length} selected files!`);
-            window.close();
-          }
-        } else {
-          alert(`⚠️ Error: ${json.error || 'Failed to submit selection'}`);
-        }
-      } catch (err) {
-        alert(`❌ Network error submitting selection: ${err.message}`);
-      } finally {
-        if (tg?.MainButton) tg.MainButton.hideProgress();
-      }
-    }
-
-    function escapeHtml(str) {
-      return (str || "").replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
-    }
-
-    // Startup
-    window.addEventListener("DOMContentLoaded", loadData);
-  </script>
+  <!-- Modular Application Logic -->
+  <script src="app.js"></script>
 </body>
 </html>
